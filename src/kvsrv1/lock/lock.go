@@ -10,10 +10,8 @@ type Lock struct {
 	// the specific Clerk type of ck but promises that ck supports
 	// Put and Get.  The tester passes the clerk in when calling
 	// MakeLock().
-	ck        kvtest.IKVClerk
-	lockKey   string
-	lockValue string
-	version   rpc.Tversion
+	ck      kvtest.IKVClerk
+	lockKey string
 }
 
 // The tester calls MakeLock() and passes in a k/v clerk; your code can
@@ -24,22 +22,30 @@ type Lock struct {
 func MakeLock(ck kvtest.IKVClerk, l string) *Lock {
 	lk := &Lock{ck: ck}
 	lk.lockKey = l
-	lk.lockValue = kvtest.RandValue(8)
 	return lk
 }
 
 func (lk *Lock) Acquire() {
+	lockValue := kvtest.RandValue(8)
 	for {
 		_, version, err := lk.ck.Get(lk.lockKey)
 		if err != rpc.OK {
-			putErr := lk.ck.Put(lk.lockKey, lk.lockValue, 0)
+			putErr := lk.ck.Put(lk.lockKey, lockValue, 0)
 			if putErr == rpc.OK {
+				break
+			}
+			value, _, _ := lk.ck.Get(lk.lockKey)
+			if putErr == rpc.ErrMaybe && value == lockValue {
 				break
 			}
 		} else {
 			if version%2 == 0 {
-				putErr := lk.ck.Put(lk.lockKey, lk.lockValue, version)
+				putErr := lk.ck.Put(lk.lockKey, lockValue, version)
 				if putErr == rpc.OK {
+					break
+				}
+				value, _, _ := lk.ck.Get(lk.lockKey)
+				if putErr == rpc.ErrMaybe && value == lockValue {
 					break
 				}
 			}
@@ -49,5 +55,5 @@ func (lk *Lock) Acquire() {
 
 func (lk *Lock) Release() {
 	_, version, _ := lk.ck.Get(lk.lockKey)
-	lk.ck.Put(lk.lockKey, lk.lockValue, version)
+	lk.ck.Put(lk.lockKey, "", version)
 }
