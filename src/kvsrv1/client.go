@@ -1,6 +1,8 @@
 package kvsrv
 
 import (
+	"time"
+
 	"6.5840/kvsrv1/rpc"
 	"6.5840/kvtest1"
 	"6.5840/tester1"
@@ -31,15 +33,18 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 	args := rpc.GetArgs{Key: key}
 	for {
 		reply := rpc.GetReply{}
-		ck.clnt.Call(ck.server, "KVServer.Get", &args, &reply)
+		ok := ck.clnt.Call(ck.server, "KVServer.Get", &args, &reply)
+		if !ok {
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
 		if reply.Err == rpc.ErrNoKey {
 			return "", 0, rpc.ErrNoKey
 		}
 
-		if reply.Err == rpc.ErrVersion {
-			continue
+		if reply.Err == rpc.OK {
+			return reply.Value, reply.Version, rpc.OK
 		}
-		return reply.Value, reply.Version, rpc.OK
 	}
 }
 
@@ -62,10 +67,27 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 // arguments. Additionally, reply must be passed as a pointer.
 func (ck *Clerk) Put(key, value string, version rpc.Tversion) rpc.Err {
 	args := rpc.PutArgs{Key: key, Value: value, Version: version}
-	reply := rpc.PutReply{}
-	ck.clnt.Call(ck.server, "KVServer.Put", &args, &reply)
-	if reply.Err != "" {
-		return reply.Err
+	first := true
+	for {
+		reply := rpc.PutReply{}
+		ok := ck.clnt.Call(ck.server, "KVServer.Put", &args, &reply)
+		if !ok {
+			first = false
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+
+		if reply.Err == rpc.ErrNoKey {
+			return rpc.ErrNoKey
+		}
+
+		if first && reply.Err == rpc.ErrVersion {
+			return rpc.ErrVersion
+		}
+
+		if !first && reply.Err == rpc.ErrVersion {
+			return rpc.ErrMaybe
+		}
+		return rpc.OK
 	}
-	return rpc.OK
 }
