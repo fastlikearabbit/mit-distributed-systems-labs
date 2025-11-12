@@ -24,7 +24,7 @@ type VersionedValue struct {
 }
 
 type KVServer struct {
-	mu           sync.Mutex
+	mu           sync.RWMutex
 	versionedMap map[string]VersionedValue
 }
 
@@ -37,8 +37,8 @@ func MakeKVServer() *KVServer {
 // Get returns the value and version for args.Key, if args.Key
 // exists. Otherwise, Get returns ErrNoKey.
 func (kv *KVServer) Get(args *rpc.GetArgs, reply *rpc.GetReply) {
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
+	kv.mu.RLock()
+	defer kv.mu.RUnlock()
 	versionedValue, ok := kv.versionedMap[args.Key]
 	if ok {
 		reply.Err = rpc.OK
