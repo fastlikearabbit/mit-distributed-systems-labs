@@ -68,18 +68,12 @@ func Worker(mapf func(string, string) []KeyValue,
 
 			for _, kv := range kva {
 				partition := ihash(kv.Key) % reply.NReduce
-				err := encoders[partition].Encode(kv)
-				if err != nil {
-					break
-				}
+				encoders[partition].Encode(kv)
 			}
 
 			for i := 0; i < reply.NReduce; i++ {
 				filename := fmt.Sprintf("mr-%d-%d", reply.TaskId, i)
-				err := os.Rename(outTempFiles[i].Name(), filename)
-				if err != nil {
-					break
-				}
+				os.Rename(outTempFiles[i].Name(), filename)
 			}
 
 			wargs := WorkerArgs{TaskId: reply.TaskId, TaskType: reply.TaskType}
@@ -88,17 +82,21 @@ func Worker(mapf func(string, string) []KeyValue,
 		case Reduce:
 			var intermediate []KeyValue
 			for _, filename := range reply.Filenames {
-				file, _ := os.Open(filename)
-
+				file, err := os.Open(filename)
+				if err != nil {
+					log.Fatal(err)
+				}
 				dec := json.NewDecoder(file)
 				for {
 					var kv KeyValue
-					if err := dec.Decode(&kv); err != nil {
+					err := dec.Decode(&kv)
+					if err != nil {
 						break
 					}
 					intermediate = append(intermediate, kv)
 				}
 				file.Close()
+				os.Remove(filename)
 			}
 
 			sort.Sort(ByKey(intermediate))
@@ -121,9 +119,8 @@ func Worker(mapf func(string, string) []KeyValue,
 				fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
 				i = j
 			}
-
-			os.Rename(ofile.Name(), oname)
 			ofile.Close()
+			os.Rename(ofile.Name(), oname)
 			wargs := WorkerArgs{TaskId: reply.TaskId, TaskType: reply.TaskType}
 			call("Coordinator.MarkTaskAsCompleted", &wargs, &WorkerReply{})
 

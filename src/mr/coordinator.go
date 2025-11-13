@@ -22,7 +22,6 @@ const (
 )
 
 type Task struct {
-	Id        TaskId
 	Type      TaskType
 	Status    TaskStatus
 	Filenames []string
@@ -37,7 +36,11 @@ type Coordinator struct {
 }
 
 func (c *Coordinator) MarkTaskAsCompleted(args *WorkerArgs, _ *WorkerReply) error {
-	c.tasks[args.TaskId].Status = Completed
+	if args.TaskType == Map {
+		c.tasks[args.TaskId].Status = Completed
+	} else {
+		c.tasks[TaskId(int(args.TaskId)+len(c.files))].Status = Completed
+	}
 	return nil
 }
 
@@ -49,12 +52,13 @@ func (c *Coordinator) HandoutTask(_ *CoordinatorArgs, reply *CoordinatorReply) e
 	}
 
 	for i := 0; i < len(c.files); i++ {
-		if c.tasks[TaskId(i)].Status == Ready {
-			c.tasks[TaskId(i)].Status = InProgress
-			c.tasks[TaskId(i)].StartTime = time.Now()
-			reply.TaskId = TaskId(i)
+		taskId := TaskId(i)
+		if c.tasks[taskId].Status == Ready {
+			c.tasks[taskId].Status = InProgress
+			c.tasks[taskId].StartTime = time.Now()
+			reply.TaskId = taskId
 			reply.TaskType = Map
-			reply.Filenames = c.tasks[TaskId(i)].Filenames
+			reply.Filenames = []string{c.files[i]}
 			reply.NReduce = c.nReduce
 			return nil
 		}
@@ -70,13 +74,13 @@ func (c *Coordinator) HandoutTask(_ *CoordinatorArgs, reply *CoordinatorReply) e
 	// all map tasks are completed begin handing out reduce tasks
 	offset := len(c.files)
 	for i := 0; i < c.nReduce; i++ {
-		if c.tasks[TaskId(offset+i)].Status == Ready {
-			c.tasks[TaskId(offset+i)].Status = InProgress
-			c.tasks[TaskId(offset+i)].StartTime = time.Now()
-			reply.TaskId = TaskId(offset + i)
+		taskId := TaskId(offset + i)
+		if c.tasks[taskId].Status == Ready {
+			c.tasks[taskId].Status = InProgress
+			c.tasks[taskId].StartTime = time.Now()
+			reply.TaskId = TaskId(i)
 			reply.TaskType = Reduce
-			reply.Filenames = c.tasks[TaskId(offset+i)].Filenames
-			fmt.Println("reply filenames len:", len(reply.Filenames))
+			reply.Filenames = c.tasks[taskId].Filenames
 			reply.NReduce = c.nReduce
 			return nil
 		}
@@ -102,8 +106,6 @@ func (c *Coordinator) server() {
 // main/mrcoordinator.go calls Done() periodically to find out
 // if the entire job has finished.
 func (c *Coordinator) Done() bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	for _, task := range c.tasks {
 		if task.Status != Completed {
 			return false
@@ -122,25 +124,23 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c.nReduce = nReduce
 	for i, file := range files {
 		task := &Task{}
-		task.Id = TaskId(i)
 		task.Type = Map
 		task.Status = Ready
 		task.Filenames = []string{file}
-		c.tasks[task.Id] = task
+		c.tasks[TaskId(i)] = task
 	}
 
 	offset := len(files)
 	for i := 0; i < nReduce; i++ {
 		task := &Task{}
-		task.Id = TaskId(offset + i)
 		task.Type = Reduce
 		task.Status = Ready
 		// set up filenames
-		for j := 0; j < nReduce; j++ {
+		for j := 0; j < offset; j++ {
 			filename := fmt.Sprintf("mr-%d-%d", j, i)
 			task.Filenames = append(task.Filenames, filename)
 		}
-		c.tasks[task.Id] = task
+		c.tasks[TaskId(i+offset)] = task
 	}
 
 	// goroutine to check for timeouts
