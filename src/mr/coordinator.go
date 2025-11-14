@@ -1,7 +1,6 @@
 package mr
 
 import (
-	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -36,6 +35,8 @@ type Coordinator struct {
 }
 
 func (c *Coordinator) MarkTaskAsCompleted(args *WorkerArgs, _ *WorkerReply) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if args.TaskType == Map {
 		c.tasks[args.TaskId].Status = Completed
 	} else {
@@ -47,9 +48,6 @@ func (c *Coordinator) MarkTaskAsCompleted(args *WorkerArgs, _ *WorkerReply) erro
 func (c *Coordinator) HandoutTask(_ *CoordinatorArgs, reply *CoordinatorReply) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.Done() {
-		return errors.New("coordinator terminated")
-	}
 
 	for i := 0; i < len(c.files); i++ {
 		taskId := TaskId(i)
@@ -86,6 +84,7 @@ func (c *Coordinator) HandoutTask(_ *CoordinatorArgs, reply *CoordinatorReply) e
 		}
 	}
 
+	reply.TaskType = Wait
 	return nil
 }
 
@@ -106,6 +105,8 @@ func (c *Coordinator) server() {
 // main/mrcoordinator.go calls Done() periodically to find out
 // if the entire job has finished.
 func (c *Coordinator) Done() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	for _, task := range c.tasks {
 		if task.Status != Completed {
 			return false
@@ -145,7 +146,10 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 
 	// goroutine to check for timeouts
 	go func() {
-		for !c.Done() {
+		for {
+			if c.Done() {
+				return
+			}
 			time.Sleep(500 * time.Millisecond)
 			c.mu.Lock()
 			for _, task := range c.tasks {

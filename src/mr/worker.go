@@ -84,7 +84,7 @@ func Worker(mapf func(string, string) []KeyValue,
 			for _, filename := range reply.Filenames {
 				file, err := os.Open(filename)
 				if err != nil {
-					log.Fatal(err)
+					continue
 				}
 				dec := json.NewDecoder(file)
 				for {
@@ -96,7 +96,6 @@ func Worker(mapf func(string, string) []KeyValue,
 					intermediate = append(intermediate, kv)
 				}
 				file.Close()
-				os.Remove(filename)
 			}
 
 			sort.Sort(ByKey(intermediate))
@@ -121,8 +120,18 @@ func Worker(mapf func(string, string) []KeyValue,
 			}
 			ofile.Close()
 			os.Rename(ofile.Name(), oname)
+
 			wargs := WorkerArgs{TaskId: reply.TaskId, TaskType: reply.TaskType}
-			call("Coordinator.MarkTaskAsCompleted", &wargs, &WorkerReply{})
+			ok := call("Coordinator.MarkTaskAsCompleted", &wargs, &WorkerReply{})
+
+			if ok {
+				for _, filename := range reply.Filenames {
+					err := os.Remove(filename)
+					if err != nil {
+						continue
+					}
+				}
+			}
 
 		case Wait:
 			time.Sleep(100 * time.Millisecond)
