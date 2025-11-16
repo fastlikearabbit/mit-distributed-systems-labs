@@ -19,11 +19,6 @@ import (
 	"6.5840/tester1"
 )
 
-type LogEntry struct {
-	command interface{}
-	term    int
-}
-
 // A Go object implementing a single Raft peer.
 type Raft struct {
 	mu        sync.Mutex          // Lock to protect shared access to this peer's state
@@ -32,23 +27,20 @@ type Raft struct {
 	me        int                 // this peer's index into peers[]
 	dead      int32               // set by Kill()
 
+	// Your data here (3A, 3B, 3C).
+	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
-	currentTerm int
-	votedFor    int
-	log         []LogEntry
-	commitIndex int
-	lastApplied int
-	nextIndex   []int
-	matchIndex  []int
 
-	lastLeaderPing      time.Time
-	randElectionTimeout time.Duration
 }
 
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-	return rf.currentTerm, rf.votedFor == rf.me
+
+	var term int
+	var isleader bool
+	// Your code here (3A).
+	return term, isleader
 }
 
 // save Raft's persistent state to stable storage,
@@ -108,17 +100,13 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 type RequestVoteArgs struct {
-	Term         int
-	CandidateId  int
-	LastLogIndex int
-	LastLogTerm  int
+	// Your data here (3A, 3B).
 }
 
 // example RequestVote RPC reply structure.
 // field names must start with capital letters!
 type RequestVoteReply struct {
-	Term        int
-	VoteGranted bool
+	// Your data here (3A).
 }
 
 // example RequestVote RPC handler.
@@ -200,15 +188,11 @@ func (rf *Raft) killed() bool {
 }
 
 func (rf *Raft) ticker() {
-	for !rf.killed() {
+	for rf.killed() == false {
 
 		// Your code here (3A)
 		// Check if a leader election should be started.
-		rf.mu.Lock()
-		if time.Since(rf.lastLeaderPing) > rf.randElectionTimeout {
-			// start new election, may need to rf.mu.Unlock() here
-		}
-		rf.mu.Unlock()
+
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
 		ms := 50 + (rand.Int63() % 300)
