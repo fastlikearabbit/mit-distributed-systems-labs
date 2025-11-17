@@ -226,6 +226,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.Term >= rf.currentTerm {
 		rf.ConvertToFollower(args.Term)
 	}
+
+	rf.ResetElectionTimer()
 	reply.Term = rf.currentTerm
 }
 
