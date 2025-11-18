@@ -104,7 +104,7 @@ func (rf *Raft) ConvertToLeader() {
 // ---------------------------------------------------------------
 
 func GetRandElectionTimeout() time.Duration {
-	ms := 500 + rand.Int63()%300
+	ms := 200 + rand.Int63()%300
 	return time.Duration(ms) * time.Millisecond
 }
 
@@ -274,8 +274,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.ConvertToFollower(args.Term)
 	}
 
-	lastLogEntry := rf.GetLastLogEntry()
-	if args.Term < rf.currentTerm || lastLogEntry.Index < args.PrevLogIndex ||
+	if args.Term < rf.currentTerm || len(rf.log) <= args.PrevLogIndex ||
 		rf.log[args.PrevLogIndex].Term != args.PrevLogTerm { // FIX THIS: sometimes gives out of bounds panic
 		reply.Success = false
 		return
@@ -286,7 +285,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	if args.Entries != nil {
 		rf.log = rf.log[:args.PrevLogIndex+1]
-		offset := lastLogEntry.Index + 1
+		offset := len(rf.log)
 		for _, entry := range args.Entries {
 			rf.log = append(rf.log, LogEntry{entry.Term, offset, entry.Command})
 			offset += 1
@@ -495,7 +494,7 @@ func (rf *Raft) startElection() {
 
 func (rf *Raft) sendHeartBeats() {
 	prevLogEntry := rf.GetPrevLogEntry()
-	args := AppendEntriesArgs{
+	initialArgs := AppendEntriesArgs{
 		Term:         rf.currentTerm,
 		LeaderId:     rf.me,
 		PrevLogIndex: prevLogEntry.Index,
@@ -507,12 +506,16 @@ func (rf *Raft) sendHeartBeats() {
 
 	for !rf.killed() {
 		for server := range rf.peers {
+			args := initialArgs
 			if server == rf.me {
 				continue
 			}
 
 			reply := AppendEntriesReply{}
 			go func(server int) {
+				rf.mu.Lock()
+				args.LeaderCommit = rf.commitIndex
+				rf.mu.Unlock()
 				ok := rf.sendAppendEntries(server, &args, &reply)
 
 				if !ok {
@@ -528,12 +531,10 @@ func (rf *Raft) sendHeartBeats() {
 		}
 
 		rf.mu.Lock()
-		if rf.state != Leader || rf.currentTerm != args.Term {
+		if rf.state != Leader || rf.currentTerm != initialArgs.Term {
 			rf.mu.Unlock()
 			return
 		}
-
-		args.LeaderCommit = rf.commitIndex
 		rf.mu.Unlock()
 
 		time.Sleep(HeartbeatInterval)
