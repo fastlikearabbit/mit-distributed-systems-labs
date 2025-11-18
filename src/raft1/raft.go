@@ -268,11 +268,11 @@ type AppendEntriesReply struct {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	reply.Term = rf.currentTerm
 
 	if args.Term >= rf.currentTerm {
 		rf.ConvertToFollower(args.Term)
 	}
+	reply.Term = rf.currentTerm
 
 	if args.Term < rf.currentTerm || len(rf.log) <= args.PrevLogIndex {
 		reply.Success = false
@@ -300,8 +300,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.commitIndex = min(args.LeaderCommit, rf.GetLastLogEntry().Index)
 		rf.applyCommitCondVar.Broadcast()
 	}
-	DPrintf("server %d log %d, state=%v\n", rf.me, rf.log, rf.state)
-	DPrintf("Appended entries: %v\n", args.Entries)
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
@@ -337,7 +335,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Command: command,
 	}
 	rf.log = append(rf.log, logEntry)
-	DPrintf("(leader)server %d log %d, state=%v\n", rf.me, rf.log, rf.state)
 	go rf.startLogReplication()
 
 	return index, term, isLeader
@@ -355,9 +352,6 @@ func (rf *Raft) startLogReplication() {
 				rf.mu.Unlock()
 				return
 			}
-
-			DPrintf("leader (%d) last log index: %v, status=%v, term=%d\n", rf.me, rf.GetLastLogEntry().Index, rf.state, rf.currentTerm)
-
 			args := AppendEntriesArgs{
 				Term:         rf.currentTerm,
 				LeaderId:     rf.me,
@@ -374,12 +368,9 @@ func (rf *Raft) startLogReplication() {
 				ok := rf.sendAppendEntries(server, &args, &reply)
 
 				if !ok {
-					//DPrintf("server %d: failed to receive AppendEntries", server)
 					time.Sleep(100 * time.Millisecond)
 					continue
 				}
-
-				//DPrintf("server %d: started receiving AppendEntries, prevLogIndex: %d\n", server, args.PrevLogIndex)
 
 				rf.mu.Lock()
 				if reply.Term > args.Term {
@@ -508,12 +499,12 @@ func (rf *Raft) startElection() {
 }
 
 func (rf *Raft) sendHeartBeats() {
-	prevLogEntry := rf.GetPrevLogEntry()
+	last := rf.GetLastLogEntry()
 	initialArgs := AppendEntriesArgs{
 		Term:         rf.currentTerm,
 		LeaderId:     rf.me,
-		PrevLogIndex: prevLogEntry.Index,
-		PrevLogTerm:  prevLogEntry.Term,
+		PrevLogIndex: last.Index,
+		PrevLogTerm:  last.Term,
 		Entries:      nil,
 		LeaderCommit: rf.commitIndex,
 	}
@@ -586,8 +577,6 @@ func (rf *Raft) applier() {
 			Command:      logEntry.Command,
 			CommandIndex: rf.lastApplied,
 		}
-		//DPrintf("server %d log %v\n", rf.me, rf.log)
-		//DPrintf("server %d applies %v\n", rf.me, logEntry)
 		rf.mu.Unlock()
 		rf.applyCh <- applyMsg
 	}
