@@ -279,7 +279,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
-	DPrintf("args.PrevLogTerm: %d, rf.log[args.PrevLogIndex]: %v\n", args.PrevLogTerm, rf.log[args.PrevLogIndex])
 	if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
 		reply.Success = false
 		return
@@ -356,6 +355,9 @@ func (rf *Raft) startLogReplication() {
 				rf.mu.Unlock()
 				return
 			}
+
+			DPrintf("leader (%d) last log index: %v, status=%v, term=%d\n", rf.me, rf.GetLastLogEntry().Index, rf.state, rf.currentTerm)
+
 			args := AppendEntriesArgs{
 				Term:         rf.currentTerm,
 				LeaderId:     rf.me,
@@ -373,7 +375,7 @@ func (rf *Raft) startLogReplication() {
 
 				if !ok {
 					//DPrintf("server %d: failed to receive AppendEntries", server)
-					time.Sleep(10 * time.Millisecond)
+					time.Sleep(100 * time.Millisecond)
 					continue
 				}
 
