@@ -21,12 +21,12 @@ import (
 
 const HeartbeatInterval = 100 * time.Millisecond
 
-type State int
+type State string
 
 const (
-	Follower State = iota
-	Candidate
-	Leader
+	Follower  State = "follower"
+	Candidate       = "candidate"
+	Leader          = "leader"
 )
 
 type LogEntry struct {
@@ -104,7 +104,7 @@ func (rf *Raft) ConvertToLeader() {
 // ---------------------------------------------------------------
 
 func GetRandElectionTimeout() time.Duration {
-	ms := 200 + rand.Int63()%300
+	ms := 300 + rand.Int63()%300
 	return time.Duration(ms) * time.Millisecond
 }
 
@@ -274,8 +274,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.ConvertToFollower(args.Term)
 	}
 
-	if args.Term < rf.currentTerm || len(rf.log) <= args.PrevLogIndex ||
-		rf.log[args.PrevLogIndex].Term != args.PrevLogTerm { // FIX THIS: sometimes gives out of bounds panic
+	if args.Term < rf.currentTerm || len(rf.log) <= args.PrevLogIndex {
+		reply.Success = false
+		return
+	}
+
+	DPrintf("args.PrevLogTerm: %d, rf.log[args.PrevLogIndex]: %v\n", args.PrevLogTerm, rf.log[args.PrevLogIndex])
+	if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
 		reply.Success = false
 		return
 	}
@@ -296,7 +301,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.commitIndex = min(args.LeaderCommit, rf.GetLastLogEntry().Index)
 		rf.applyCommitCondVar.Broadcast()
 	}
-	//DPrintf("server %d log %d\n", rf.me, rf.log)
+	DPrintf("server %d log %d, state=%v\n", rf.me, rf.log, rf.state)
+	DPrintf("Appended entries: %v\n", args.Entries)
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
@@ -318,12 +324,12 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 // the leader.
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	index := len(rf.log)
 	term := rf.currentTerm
 	isLeader := rf.state == Leader
 
 	if !isLeader {
-		rf.mu.Unlock()
 		return 0, 0, false
 	}
 	logEntry := LogEntry{
@@ -332,32 +338,35 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Command: command,
 	}
 	rf.log = append(rf.log, logEntry)
-	//DPrintf("(leader) server %d log %d\n", rf.me, rf.log)
+	DPrintf("(leader)server %d log %d, state=%v\n", rf.me, rf.log, rf.state)
 	go rf.startLogReplication()
 
 	return index, term, isLeader
 }
 
 func (rf *Raft) startLogReplication() {
-	prevLogEntry := rf.GetPrevLogEntry()
-
-	initialArgs := AppendEntriesArgs{
-		Term:         rf.currentTerm,
-		LeaderId:     rf.me,
-		PrevLogIndex: prevLogEntry.Index,
-		PrevLogTerm:  prevLogEntry.Term,
-		Entries:      rf.log[prevLogEntry.Index+1:],
-		LeaderCommit: rf.commitIndex,
-	}
-	rf.mu.Unlock()
-
 	replicationCount := 0
 	for server := range rf.peers {
 		if server == rf.me {
 			continue
 		}
 		go func(server int) {
-			args := initialArgs
+			rf.mu.Lock()
+			if rf.GetLastLogEntry().Index < rf.nextIndex[server] {
+				rf.mu.Unlock()
+				return
+			}
+			args := AppendEntriesArgs{
+				Term:         rf.currentTerm,
+				LeaderId:     rf.me,
+				PrevLogIndex: rf.nextIndex[server] - 1,
+				PrevLogTerm:  rf.log[rf.nextIndex[server]-1].Term,
+				Entries:      rf.log[rf.nextIndex[server]:],
+				LeaderCommit: rf.commitIndex,
+			}
+
+			newMatchId := args.PrevLogIndex + len(args.Entries)
+			rf.mu.Unlock()
 			for !rf.killed() {
 				reply := AppendEntriesReply{}
 				ok := rf.sendAppendEntries(server, &args, &reply)
@@ -378,7 +387,7 @@ func (rf *Raft) startLogReplication() {
 				}
 
 				if reply.Success {
-					rf.matchIndex[server] = initialArgs.PrevLogIndex + len(initialArgs.Entries)
+					rf.matchIndex[server] = newMatchId
 					rf.nextIndex[server] = rf.matchIndex[server] + 1
 					replicationCount += 1
 
@@ -390,11 +399,15 @@ func (rf *Raft) startLogReplication() {
 					return
 				}
 
-				args.LeaderCommit = rf.commitIndex
-				args.PrevLogIndex = max(0, args.PrevLogIndex-1)
-				args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
-				args.Entries = rf.log[args.PrevLogIndex+1:]
 				rf.nextIndex[server] -= 1
+				args = AppendEntriesArgs{
+					Term:         rf.currentTerm,
+					LeaderId:     rf.me,
+					PrevLogIndex: rf.nextIndex[server] - 1,
+					PrevLogTerm:  rf.log[rf.nextIndex[server]-1].Term,
+					Entries:      rf.log[rf.nextIndex[server]:],
+					LeaderCommit: rf.commitIndex,
+				}
 
 				rf.mu.Unlock()
 			}
