@@ -71,11 +71,7 @@ func (rf *Raft) GetLastLogEntry() LogEntry {
 
 func (rf *Raft) GetPrevLogEntry() LogEntry {
 	if len(rf.log) <= 1 {
-		return LogEntry{
-			Term:    -1,
-			Index:   -1,
-			Command: nil,
-		}
+		return rf.log[0]
 	}
 	return rf.log[len(rf.log)-2]
 }
@@ -277,20 +273,24 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.Term >= rf.currentTerm {
 		rf.ConvertToFollower(args.Term)
 	}
+
 	lastLogEntry := rf.GetLastLogEntry()
-	if args.Term < rf.currentTerm || lastLogEntry.Index < args.PrevLogIndex {
+	if args.Term < rf.currentTerm || lastLogEntry.Index < args.PrevLogIndex ||
+		rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
 		reply.Success = false
 		return
 	}
 
-	// TODO: Recheck if the checks 2 and 3 are applied correctly
-	if lastLogEntry.Term != args.PrevLogTerm {
-		rf.log = rf.log[:lastLogEntry.Index]
-		reply.Success = false
-		return
-	}
+	//rf.log = rf.log[:args.PrevLogIndex+1]
 
+	rf.ResetElectionTimer()
 	reply.Success = true
+
+	if args.Entries == nil {
+		rf.commitIndex = args.LeaderCommit
+		rf.applyCommitCondVar.Broadcast()
+		return
+	}
 
 	offset := lastLogEntry.Index + 1
 	for _, entry := range args.Entries {
@@ -323,12 +323,12 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 // the leader.
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
 	index := len(rf.log)
 	term := rf.currentTerm
 	isLeader := rf.state == Leader
 
 	if !isLeader {
+		rf.mu.Unlock()
 		return 0, 0, false
 	}
 	logEntry := LogEntry{
@@ -337,8 +337,71 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Command: command,
 	}
 	rf.log = append(rf.log, logEntry)
+	go rf.startLogReplication()
 
 	return index, term, isLeader
+}
+
+func (rf *Raft) startLogReplication() {
+	prevLogEntry := rf.GetPrevLogEntry()
+	log := append([]LogEntry(nil), rf.log...)
+
+	args := AppendEntriesArgs{
+		Term:         rf.currentTerm,
+		LeaderId:     rf.me,
+		PrevLogIndex: prevLogEntry.Index,
+		PrevLogTerm:  prevLogEntry.Term,
+		Entries:      log[prevLogEntry.Index+1:],
+		LeaderCommit: rf.commitIndex,
+	}
+	rf.mu.Unlock()
+
+	replicationCount := 0
+	for server := range rf.peers {
+		if server == rf.me {
+			continue
+		}
+		go func(server int) {
+			for !rf.killed() {
+				reply := AppendEntriesReply{}
+				ok := rf.sendAppendEntries(server, &args, &reply)
+
+				if !ok {
+					time.Sleep(10 * time.Millisecond)
+					continue
+				}
+
+				rf.mu.Lock()
+				if reply.Term > args.Term {
+					rf.ConvertToFollower(reply.Term)
+					rf.mu.Unlock()
+					return
+				}
+
+				if reply.Success {
+					rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
+					rf.nextIndex[server] = rf.matchIndex[server] + 1
+					replicationCount += 1
+
+					if replicationCount >= len(rf.log)/2 && rf.commitIndex <= rf.lastApplied &&
+						rf.log[rf.matchIndex[server]].Term == rf.currentTerm {
+						rf.commitIndex = rf.matchIndex[server]
+						rf.applyCommitCondVar.Broadcast()
+					}
+					rf.mu.Unlock()
+					return
+				}
+
+				args.LeaderCommit = rf.commitIndex
+				args.PrevLogIndex = max(0, args.PrevLogIndex-1)
+				args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
+				args.Entries = rf.log[args.PrevLogIndex+1:]
+				rf.nextIndex[server] -= 1
+
+				rf.mu.Unlock()
+			}
+		}(server)
+	}
 }
 
 // the tester doesn't halt goroutines created by Raft after each test,
@@ -433,22 +496,17 @@ func (rf *Raft) startElection() {
 
 func (rf *Raft) sendHeartBeats() {
 	prevLogEntry := rf.GetPrevLogEntry()
-
 	args := AppendEntriesArgs{
 		Term:         rf.currentTerm,
 		LeaderId:     rf.me,
 		PrevLogIndex: prevLogEntry.Index,
 		PrevLogTerm:  prevLogEntry.Term,
+		Entries:      nil,
 		LeaderCommit: rf.commitIndex,
-		//Entries:     ...,
 	}
-
-	N := rf.commitIndex
-
 	rf.mu.Unlock()
 
 	for !rf.killed() {
-		successCount := 0
 		for server := range rf.peers {
 			if server == rf.me {
 				continue
@@ -456,34 +514,17 @@ func (rf *Raft) sendHeartBeats() {
 
 			reply := AppendEntriesReply{}
 			go func(server int) {
-				for {
-					rf.mu.Unlock()
+				ok := rf.sendAppendEntries(server, &args, &reply)
 
-					ok := rf.sendAppendEntries(server, &args, &reply)
-
-					if !ok {
-						return
-					}
-
-					rf.mu.Lock()
-					if reply.Term > args.Term {
-						rf.ConvertToFollower(reply.Term)
-						rf.mu.Unlock()
-						return
-					}
-					if reply.Success {
-						rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
-						rf.nextIndex[server] = rf.matchIndex[server] + 1
-
-						successCount += 1
-						N += 1
-
-						rf.mu.Unlock()
-						return
-					}
-
-					rf.mu.Unlock()
+				if !ok {
+					return
 				}
+
+				rf.mu.Lock()
+				if reply.Term > args.Term {
+					rf.ConvertToFollower(reply.Term)
+				}
+				rf.mu.Unlock()
 			}(server)
 		}
 
@@ -493,10 +534,7 @@ func (rf *Raft) sendHeartBeats() {
 			return
 		}
 
-		if successCount >= len(rf.peers)/2 && N > rf.commitIndex && rf.log[N].Term == rf.currentTerm {
-			rf.commitIndex = N
-			rf.applyCommitCondVar.Broadcast()
-		}
+		args.LeaderCommit = rf.commitIndex
 		rf.mu.Unlock()
 
 		time.Sleep(HeartbeatInterval)
@@ -525,18 +563,20 @@ func (rf *Raft) applier() {
 		for rf.commitIndex <= rf.lastApplied {
 			rf.applyCommitCondVar.Wait()
 		}
-
 		if rf.commitIndex > rf.lastApplied {
+			rf.lastApplied += 1
+
 			logEntry := rf.log[rf.lastApplied]
 			applyMsg := raftapi.ApplyMsg{
 				CommandValid: true,
 				Command:      logEntry.Command,
 				CommandIndex: rf.commitIndex,
 			}
+			rf.mu.Unlock()
 			rf.applyCh <- applyMsg
-			rf.lastApplied += 1
+		} else {
+			rf.mu.Unlock()
 		}
-		rf.mu.Unlock()
 	}
 }
 
@@ -556,7 +596,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister = persister
 	rf.me = me
 
-	// Your initialization code here (3A, 3B, 3C).
 	rf.state = Follower
 
 	rf.currentTerm = 0
