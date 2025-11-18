@@ -281,27 +281,23 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
-	//rf.log = rf.log[:args.PrevLogIndex+1]
-
 	rf.ResetElectionTimer()
 	reply.Success = true
 
-	if args.Entries == nil {
-		rf.commitIndex = args.LeaderCommit
-		rf.applyCommitCondVar.Broadcast()
-		return
-	}
-
-	offset := lastLogEntry.Index + 1
-	for _, entry := range args.Entries {
-		rf.log = append(rf.log, LogEntry{entry.Term, offset, entry.Command})
-		offset += 1
+	if args.Entries != nil {
+		rf.log = rf.log[:args.PrevLogIndex+1]
+		offset := lastLogEntry.Index + 1
+		for _, entry := range args.Entries {
+			rf.log = append(rf.log, LogEntry{entry.Term, offset, entry.Command})
+			offset += 1
+		}
 	}
 
 	if args.LeaderCommit > rf.commitIndex {
 		rf.commitIndex = min(args.LeaderCommit, rf.GetLastLogEntry().Index)
 		rf.applyCommitCondVar.Broadcast()
 	}
+	//DPrintf("server %d log %d\n", rf.me, rf.log)
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
@@ -337,6 +333,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Command: command,
 	}
 	rf.log = append(rf.log, logEntry)
+	//DPrintf("(leader) server %d log %d\n", rf.me, rf.log)
 	go rf.startLogReplication()
 
 	return index, term, isLeader
@@ -344,14 +341,13 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 func (rf *Raft) startLogReplication() {
 	prevLogEntry := rf.GetPrevLogEntry()
-	log := append([]LogEntry(nil), rf.log...)
 
-	args := AppendEntriesArgs{
+	initialArgs := AppendEntriesArgs{
 		Term:         rf.currentTerm,
 		LeaderId:     rf.me,
 		PrevLogIndex: prevLogEntry.Index,
 		PrevLogTerm:  prevLogEntry.Term,
-		Entries:      log[prevLogEntry.Index+1:],
+		Entries:      rf.log[prevLogEntry.Index+1:],
 		LeaderCommit: rf.commitIndex,
 	}
 	rf.mu.Unlock()
@@ -363,6 +359,10 @@ func (rf *Raft) startLogReplication() {
 		}
 		go func(server int) {
 			for !rf.killed() {
+				rf.mu.Lock()
+				args := initialArgs
+				rf.mu.Unlock()
+
 				reply := AppendEntriesReply{}
 				ok := rf.sendAppendEntries(server, &args, &reply)
 
@@ -383,8 +383,7 @@ func (rf *Raft) startLogReplication() {
 					rf.nextIndex[server] = rf.matchIndex[server] + 1
 					replicationCount += 1
 
-					if replicationCount >= len(rf.log)/2 && rf.commitIndex <= rf.lastApplied &&
-						rf.log[rf.matchIndex[server]].Term == rf.currentTerm {
+					if replicationCount >= len(rf.peers)/2 && rf.log[rf.matchIndex[server]].Term == rf.currentTerm {
 						rf.commitIndex = rf.matchIndex[server]
 						rf.applyCommitCondVar.Broadcast()
 					}
@@ -572,6 +571,7 @@ func (rf *Raft) applier() {
 				Command:      logEntry.Command,
 				CommandIndex: rf.commitIndex,
 			}
+			//DPrintf("server %d applies %v\n", rf.me, applyMsg)
 			rf.mu.Unlock()
 			rf.applyCh <- applyMsg
 		} else {
