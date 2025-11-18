@@ -276,7 +276,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	lastLogEntry := rf.GetLastLogEntry()
 	if args.Term < rf.currentTerm || lastLogEntry.Index < args.PrevLogIndex ||
-		rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+		rf.log[args.PrevLogIndex].Term != args.PrevLogTerm { // FIX THIS: sometimes gives out of bounds panic
 		reply.Success = false
 		return
 	}
@@ -358,18 +358,18 @@ func (rf *Raft) startLogReplication() {
 			continue
 		}
 		go func(server int) {
+			args := initialArgs
 			for !rf.killed() {
-				rf.mu.Lock()
-				args := initialArgs
-				rf.mu.Unlock()
-
 				reply := AppendEntriesReply{}
 				ok := rf.sendAppendEntries(server, &args, &reply)
 
 				if !ok {
+					//DPrintf("server %d: failed to receive AppendEntries", server)
 					time.Sleep(10 * time.Millisecond)
 					continue
 				}
+
+				//DPrintf("server %d: started receiving AppendEntries, prevLogIndex: %d\n", server, args.PrevLogIndex)
 
 				rf.mu.Lock()
 				if reply.Term > args.Term {
@@ -379,7 +379,7 @@ func (rf *Raft) startLogReplication() {
 				}
 
 				if reply.Success {
-					rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
+					rf.matchIndex[server] = initialArgs.PrevLogIndex + len(initialArgs.Entries)
 					rf.nextIndex[server] = rf.matchIndex[server] + 1
 					replicationCount += 1
 
@@ -562,21 +562,18 @@ func (rf *Raft) applier() {
 		for rf.commitIndex <= rf.lastApplied {
 			rf.applyCommitCondVar.Wait()
 		}
-		if rf.commitIndex > rf.lastApplied {
-			rf.lastApplied += 1
+		rf.lastApplied += 1
 
-			logEntry := rf.log[rf.lastApplied]
-			applyMsg := raftapi.ApplyMsg{
-				CommandValid: true,
-				Command:      logEntry.Command,
-				CommandIndex: rf.commitIndex,
-			}
-			//DPrintf("server %d applies %v\n", rf.me, applyMsg)
-			rf.mu.Unlock()
-			rf.applyCh <- applyMsg
-		} else {
-			rf.mu.Unlock()
+		logEntry := rf.log[rf.lastApplied] // FIX THIS: sometimes gives out of range panic
+		applyMsg := raftapi.ApplyMsg{
+			CommandValid: true,
+			Command:      logEntry.Command,
+			CommandIndex: rf.lastApplied,
 		}
+		//DPrintf("server %d log %v\n", rf.me, rf.log)
+		//DPrintf("server %d applies %v\n", rf.me, logEntry)
+		rf.mu.Unlock()
+		rf.applyCh <- applyMsg
 	}
 }
 
