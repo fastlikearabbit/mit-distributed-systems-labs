@@ -703,7 +703,7 @@ func (rf *Raft) sendAppendEntriesToFollower(server int) {
 			return
 		}
 
-		rf.nextIndex[server] = rf.snapshot.LastIncludedIndex + 1
+		rf.nextIndex[server] = snapArgs.LastIncludedIndex + 1
 		rf.matchIndex[server] = snapArgs.LastIncludedIndex
 
 		rf.updateCommitIndex()
