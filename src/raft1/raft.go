@@ -405,7 +405,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	if args.PrevLogIndex > lastLogIndex {
 		reply.Success = false
-		reply.XLen = rf.GetLastLogEntry().Index + 1
+		reply.XLen = len(rf.log)
 		reply.XTerm = -1
 		reply.XIndex = -1
 		return
@@ -709,7 +709,7 @@ func (rf *Raft) sendAppendEntriesToFollower(server int) {
 		}
 	} else {
 		if reply.XTerm == -1 {
-			rf.nextIndex[server] = reply.XLen
+			rf.nextIndex[server] = reply.XLen + startIndex
 		} else {
 			lastIndexOfXTerm := -1
 			for i := len(rf.log) - 1; i >= 0; i-- {
@@ -847,7 +847,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			SnapshotTerm:  rf.snapshot.LastIncludedTerm,
 			Snapshot:      rf.snapshot.Snapshot,
 		}
-		applyCh <- applyMsg
+		go func() {
+			applyCh <- applyMsg
+		}()
 	}
 
 	// start ticker goroutine to start elections
