@@ -7,12 +7,15 @@ package raft
 // Make() creates a new raft peer that implements the raft interface.
 
 import (
+	"bytes"
 	//	"bytes"
+	"log"
 	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"6.5840/labgob"
 	//	"6.5840/labgob"
 	"6.5840/labrpc"
 	"6.5840/raftapi"
@@ -140,6 +143,13 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// raftstate := w.Bytes()
 	// rf.persister.Save(raftstate, nil)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	raftstate := w.Bytes()
+	rf.persister.Save(raftstate, nil)
 }
 
 // restore previously persisted state.
@@ -160,6 +170,19 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currentTerm int
+	var votedFor int
+	var rflog []LogEntry
+
+	if d.Decode(&currentTerm) != nil || d.Decode(&votedFor) != nil || d.Decode(&rflog) != nil {
+		log.Fatal("Error decoding Persist")
+		return
+	}
+	rf.currentTerm = currentTerm
+	rf.votedFor = votedFor
+	rf.log = rflog
 }
 
 // how many bytes in Raft's persisted log?
@@ -199,6 +222,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	if args.Term > rf.currentTerm {
 		rf.ConvertToFollower(args.Term)
+		rf.persist()
 	}
 
 	if args.Term < rf.currentTerm {
@@ -215,6 +239,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.votedFor = args.CandidateId
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = true
+		rf.persist()
 	}
 	reply.Term = rf.currentTerm
 }
@@ -275,6 +300,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	if args.Term >= rf.currentTerm {
 		rf.ConvertToFollower(args.Term)
+		rf.persist()
 	}
 
 	rf.ResetElectionTimer()
@@ -324,10 +350,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			rf.log = rf.log[:logIndex]
 			rf.log = append(rf.log, args.Entries[newEntriesIndex:]...)
 		}
+		rf.persist()
 	}
 
 	if args.LeaderCommit > rf.commitIndex {
 		rf.commitIndex = min(args.LeaderCommit, rf.GetLastLogEntry().Index)
+		rf.persist()
 		rf.applyCommitCondVar.Broadcast()
 	}
 }
@@ -365,6 +393,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Command: command,
 	}
 	rf.log = append(rf.log, logEntry)
+	rf.persist()
 
 	return index, term, isLeader
 }
@@ -427,6 +456,7 @@ func (rf *Raft) startElection() {
 			rf.mu.Lock()
 			if reply.Term > args.Term {
 				rf.ConvertToFollower(reply.Term)
+				rf.persist()
 			}
 			rf.mu.Unlock()
 
@@ -451,6 +481,7 @@ func (rf *Raft) startElection() {
 	if voteCount >= len(rf.peers)/2 && rf.currentTerm == args.Term {
 		electionMutex.Unlock()
 		rf.ConvertToLeader()
+		rf.persist()
 		go rf.sendHeartBeats()
 		return
 	}
@@ -533,6 +564,7 @@ func (rf *Raft) sendAppendEntriesToFollower(server int) {
 
 	if reply.Term > rf.currentTerm {
 		rf.ConvertToFollower(reply.Term)
+		rf.persist()
 		return
 	}
 
