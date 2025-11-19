@@ -107,7 +107,7 @@ func (rf *Raft) ConvertToLeader() {
 // ---------------------------------------------------------------
 
 func GetRandElectionTimeout() time.Duration {
-	ms := 300 + rand.Int63()%100
+	ms := 300 + rand.Int63()%300
 	return time.Duration(ms) * time.Millisecond
 }
 
@@ -298,18 +298,18 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	if args.Term >= rf.currentTerm {
+	if args.Term > rf.currentTerm {
 		rf.ConvertToFollower(args.Term)
 		rf.persist()
 	}
-
-	rf.ResetElectionTimer()
 	reply.Term = rf.currentTerm
 
 	if args.Term < rf.currentTerm {
 		reply.Success = false
 		return
 	}
+
+	rf.ResetElectionTimer()
 
 	if len(rf.log) <= args.PrevLogIndex {
 		reply.Success = false
@@ -349,13 +349,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if newEntriesIndex < len(args.Entries) {
 			rf.log = rf.log[:logIndex]
 			rf.log = append(rf.log, args.Entries[newEntriesIndex:]...)
+			rf.persist()
 		}
-		rf.persist()
 	}
 
 	if args.LeaderCommit > rf.commitIndex {
 		rf.commitIndex = min(args.LeaderCommit, rf.GetLastLogEntry().Index)
-		rf.persist()
 		rf.applyCommitCondVar.Broadcast()
 	}
 }
@@ -418,6 +417,7 @@ func (rf *Raft) killed() bool {
 
 func (rf *Raft) startElection() {
 	rf.ConvertToCandidate()
+	rf.persist()
 	rf.ResetElectionTimer()
 
 	lastLogEntry := rf.GetLastLogEntry()
@@ -481,7 +481,6 @@ func (rf *Raft) startElection() {
 	if voteCount >= len(rf.peers)/2 && rf.currentTerm == args.Term {
 		electionMutex.Unlock()
 		rf.ConvertToLeader()
-		rf.persist()
 		go rf.sendHeartBeats()
 		return
 	}
