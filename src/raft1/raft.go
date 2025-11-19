@@ -104,7 +104,7 @@ func (rf *Raft) ConvertToLeader() {
 // ---------------------------------------------------------------
 
 func GetRandElectionTimeout() time.Duration {
-	ms := 300 + rand.Int63()%200
+	ms := 300 + rand.Int63()%100
 	return time.Duration(ms) * time.Millisecond
 }
 
@@ -263,6 +263,10 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term    int
 	Success bool
+
+	XTerm  int
+	XIndex int
+	XLen   int
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -281,11 +285,21 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	if len(rf.log) <= args.PrevLogIndex {
 		reply.Success = false
+		reply.XLen = len(rf.log)
+		reply.XTerm = -1
+		reply.XIndex = -1
 		return
 	}
 
 	if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
 		reply.Success = false
+		reply.XTerm = rf.log[args.PrevLogIndex].Term
+
+		reply.XIndex = args.PrevLogIndex
+		for reply.XIndex > 0 && rf.log[reply.XIndex-1].Term == reply.XTerm {
+			reply.XIndex--
+		}
+		reply.XLen = len(rf.log)
 		return
 	}
 
@@ -530,8 +544,29 @@ func (rf *Raft) sendAppendEntriesToFollower(server int) {
 			}
 		}
 	} else {
-		if rf.nextIndex[server] > 1 {
-			rf.nextIndex[server]--
+		if reply.XTerm == -1 {
+			rf.nextIndex[server] = reply.XLen
+		} else {
+			lastIndexOfXTerm := -1
+			for i := len(rf.log) - 1; i > 0; i-- {
+				if rf.log[i].Term == reply.XTerm {
+					lastIndexOfXTerm = i
+					break
+				}
+				if rf.log[i].Term < reply.XTerm {
+					break
+				}
+			}
+
+			if lastIndexOfXTerm != -1 {
+				rf.nextIndex[server] = lastIndexOfXTerm + 1
+			} else {
+				rf.nextIndex[server] = reply.XIndex
+			}
+		}
+
+		if rf.nextIndex[server] < 1 {
+			rf.nextIndex[server] = 1
 		}
 	}
 }
@@ -585,11 +620,11 @@ func (rf *Raft) applier() {
 		}
 		rf.lastApplied += 1
 
-		logEntry := rf.log[rf.lastApplied]
+		entry := rf.log[rf.lastApplied]
 		applyMsg := raftapi.ApplyMsg{
 			CommandValid: true,
-			Command:      logEntry.Command,
-			CommandIndex: logEntry.Index,
+			Command:      entry.Command,
+			CommandIndex: entry.Index,
 		}
 		rf.mu.Unlock()
 		rf.applyCh <- applyMsg
