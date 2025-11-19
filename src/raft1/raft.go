@@ -263,6 +263,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	if rf.commitIndex < args.LastIncludedIndex {
 		rf.commitIndex = args.LastIncludedIndex
 	}
+
 	if rf.lastApplied < args.LastIncludedIndex {
 		rf.lastApplied = args.LastIncludedIndex
 	}
@@ -444,7 +445,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	if args.PrevLogIndex > lastLogIndex {
 		reply.Success = false
-		reply.XLen = len(rf.log)
+		reply.XLen = rf.GetLastLogEntry().Index + 1
 		reply.XTerm = -1
 		reply.XIndex = -1
 		return
@@ -670,7 +671,6 @@ func (rf *Raft) sendAppendEntriesToFollower(server int) {
 	if nextIndex <= startIndex {
 		if rf.snapshot == nil {
 			rf.mu.Unlock()
-			log.Fatal("no snapshot available")
 			return
 		}
 
@@ -770,7 +770,7 @@ func (rf *Raft) sendAppendEntriesToFollower(server int) {
 		}
 	} else {
 		if reply.XTerm == -1 {
-			rf.nextIndex[server] = reply.XLen + startIndex
+			rf.nextIndex[server] = reply.XLen
 		} else {
 			lastIndexOfXTerm := -1
 			for i := len(rf.log) - 1; i >= 0; i-- {
@@ -852,8 +852,8 @@ func (rf *Raft) applier() {
 		logIndex := rf.logIndex(rf.lastApplied + 1)
 
 		if logIndex < 0 || logIndex >= len(rf.log) {
-			rf.lastApplied += 1
 			rf.mu.Unlock()
+			time.Sleep(10 * time.Millisecond)
 			continue
 		}
 
@@ -917,9 +917,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			SnapshotTerm:  rf.snapshot.LastIncludedTerm,
 			Snapshot:      rf.snapshot.Snapshot,
 		}
-		go func() {
-			applyCh <- applyMsg
-		}()
+		applyCh <- applyMsg
 	}
 
 	// start ticker goroutine to start elections
