@@ -454,10 +454,26 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 	}
 
+	if len(rf.log) > 0 {
+		lastLogIndex = rf.log[len(rf.log)-1].Index
+	} else {
+		lastLogIndex = startIndex
+	}
+
 	if args.LeaderCommit > rf.commitIndex {
 		rf.commitIndex = min(args.LeaderCommit, lastLogIndex)
 		rf.applyCommitCondVar.Broadcast()
 	}
+
+	li := 0
+	lt := 0
+
+	if rf.snapshot != nil {
+		li = rf.snapshot.LastIncludedIndex
+		lt = rf.snapshot.LastIncludedTerm
+	}
+	DPrintf("(after append entries) server %d last log entry: %v, snapshot - lastIncludedIndex: %d, lastIncludedTerm: %d\n", rf.me, rf.log[len(rf.log)-1], li, lt)
+
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
@@ -486,6 +502,14 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 	rf.log = append(rf.log, logEntry)
 	rf.persist()
+	li := 0
+	lt := 0
+
+	if rf.snapshot != nil {
+		li = rf.snapshot.LastIncludedIndex
+		lt = rf.snapshot.LastIncludedTerm
+	}
+	DPrintf("(after append entries) server %d last log entry: %v, snapshot - lastIncludedIndex: %d, lastIncludedTerm: %d\n", rf.me, rf.log[len(rf.log)-1], li, lt)
 
 	return index, term, isLeader
 }
@@ -604,133 +628,156 @@ func (rf *Raft) sendAppendEntriesToFollower(server int) {
 		return
 	}
 
-	nextIndex := rf.nextIndex[server]
-	startIndex := rf.startIndex()
+	for {
+		nextIndex := rf.nextIndex[server]
+		startIndex := rf.startIndex()
 
-	if nextIndex <= startIndex {
-		if rf.snapshot == nil {
+		if nextIndex <= startIndex {
+			if rf.snapshot == nil {
+				rf.mu.Unlock()
+				return
+			}
+
+			snapArgs := InstallSnapshotArgs{
+				Term:              rf.currentTerm,
+				LeaderId:          rf.me,
+				LastIncludedIndex: rf.snapshot.LastIncludedIndex,
+				LastIncludedTerm:  rf.snapshot.LastIncludedTerm,
+				Data:              rf.snapshot.Snapshot,
+			}
+			currentTerm := rf.currentTerm
+			rf.mu.Unlock()
+
+			reply := InstallSnapshotReply{}
+			ok := rf.sendInstallSnapshot(server, &snapArgs, &reply)
+			if !ok {
+				return
+			}
+
+			rf.mu.Lock()
+
+			if rf.state != Leader || rf.currentTerm != currentTerm {
+				rf.mu.Unlock()
+				return
+			}
+
+			if reply.Term > rf.currentTerm {
+				rf.ConvertToFollower(reply.Term)
+				rf.persist()
+				rf.mu.Unlock()
+				return
+			}
+
+			rf.nextIndex[server] = snapArgs.LastIncludedIndex + 1
+			rf.matchIndex[server] = snapArgs.LastIncludedIndex
+
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+
+		prevLogIndex := nextIndex - 1
+		prevLogArrayIdx := rf.logIndex(prevLogIndex)
+
+		if prevLogArrayIdx < 0 || prevLogArrayIdx >= len(rf.log) {
+			if prevLogArrayIdx < 0 {
+				time.Sleep(10 * time.Millisecond)
+				continue
+			}
 			rf.mu.Unlock()
 			return
 		}
 
-		snapArgs := InstallSnapshotArgs{
-			Term:              rf.currentTerm,
-			LeaderId:          rf.me,
-			LastIncludedIndex: rf.snapshot.LastIncludedIndex,
-			LastIncludedTerm:  rf.snapshot.LastIncludedTerm,
-			Data:              rf.snapshot.Snapshot,
+		prevLogTerm := rf.log[prevLogArrayIdx].Term
+
+		var entriesToSend []LogEntry
+		nextLogArrayIdx := rf.logIndex(nextIndex)
+		if nextLogArrayIdx >= 0 && nextLogArrayIdx < len(rf.log) {
+			entriesToSend = make([]LogEntry, len(rf.log[nextLogArrayIdx:]))
+			copy(entriesToSend, rf.log[nextLogArrayIdx:])
 		}
+
+		args := AppendEntriesArgs{
+			Term:         rf.currentTerm,
+			LeaderId:     rf.me,
+			PrevLogIndex: prevLogIndex,
+			PrevLogTerm:  prevLogTerm,
+			Entries:      entriesToSend,
+			LeaderCommit: rf.commitIndex,
+		}
+
 		currentTerm := rf.currentTerm
 		rf.mu.Unlock()
 
-		reply := InstallSnapshotReply{}
-		ok := rf.sendInstallSnapshot(server, &snapArgs, &reply)
+		reply := AppendEntriesReply{}
+		ok := rf.sendAppendEntries(server, &args, &reply)
+
 		if !ok {
 			return
 		}
 
 		rf.mu.Lock()
-		defer rf.mu.Unlock()
 
 		if rf.state != Leader || rf.currentTerm != currentTerm {
+			rf.mu.Unlock()
 			return
 		}
 
 		if reply.Term > rf.currentTerm {
 			rf.ConvertToFollower(reply.Term)
 			rf.persist()
+			rf.mu.Unlock()
 			return
 		}
 
-		rf.nextIndex[server] = snapArgs.LastIncludedIndex + 1
-		rf.matchIndex[server] = snapArgs.LastIncludedIndex
+		if reply.Success {
+			newMatchIndex := args.PrevLogIndex
+			if len(args.Entries) > 0 {
+				newMatchIndex = args.PrevLogIndex + len(args.Entries)
+			}
 
-		rf.updateCommitIndex()
-		return
-	}
-
-	prevLogIndex := nextIndex - 1
-	prevLogArrayIdx := rf.logIndex(prevLogIndex)
-
-	if prevLogArrayIdx < 0 || prevLogArrayIdx >= len(rf.log) {
-		rf.mu.Unlock()
-		return
-	}
-
-	prevLogTerm := rf.log[prevLogArrayIdx].Term
-
-	var entriesToSend []LogEntry
-	nextLogArrayIdx := rf.logIndex(nextIndex)
-	if nextLogArrayIdx >= 0 && nextLogArrayIdx < len(rf.log) {
-		entriesToSend = make([]LogEntry, len(rf.log[nextLogArrayIdx:]))
-		copy(entriesToSend, rf.log[nextLogArrayIdx:])
-	}
-
-	args := AppendEntriesArgs{
-		Term:         rf.currentTerm,
-		LeaderId:     rf.me,
-		PrevLogIndex: prevLogIndex,
-		PrevLogTerm:  prevLogTerm,
-		Entries:      entriesToSend,
-		LeaderCommit: rf.commitIndex,
-	}
-
-	currentTerm := rf.currentTerm
-	rf.mu.Unlock()
-
-	reply := AppendEntriesReply{}
-	ok := rf.sendAppendEntries(server, &args, &reply)
-
-	if !ok {
-		return
-	}
-
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-
-	if rf.state != Leader || rf.currentTerm != currentTerm {
-		return
-	}
-
-	if reply.Term > rf.currentTerm {
-		rf.ConvertToFollower(reply.Term)
-		rf.persist()
-		return
-	}
-
-	if reply.Success {
-		if len(args.Entries) > 0 {
-			newMatchIndex := args.PrevLogIndex + len(args.Entries)
 			if newMatchIndex > rf.matchIndex[server] {
 				rf.matchIndex[server] = newMatchIndex
 				rf.nextIndex[server] = newMatchIndex + 1
 				rf.updateCommitIndex()
 			}
-		}
-	} else {
-		if reply.XTerm == -1 {
-			rf.nextIndex[server] = reply.XLen + startIndex
+			rf.mu.Unlock()
+			return
 		} else {
-			lastIndexOfXTerm := -1
-			for i := len(rf.log) - 1; i >= 0; i-- {
-				if rf.log[i].Term == reply.XTerm {
-					lastIndexOfXTerm = rf.log[i].Index
-					break
-				}
-				if rf.log[i].Term < reply.XTerm {
-					break
-				}
-			}
+			startIndex := rf.startIndex()
 
-			if lastIndexOfXTerm != -1 {
-				rf.nextIndex[server] = lastIndexOfXTerm + 1
+			if reply.XTerm == -1 {
+				if reply.XLen < startIndex {
+					rf.nextIndex[server] = startIndex
+
+					time.Sleep(10 * time.Millisecond)
+					continue
+				}
+				rf.nextIndex[server] = reply.XLen + startIndex
 			} else {
-				rf.nextIndex[server] = reply.XIndex
-			}
-		}
+				lastIndexOfXTerm := -1
+				for i := len(rf.log) - 1; i >= 0; i-- {
+					if rf.log[i].Term == reply.XTerm {
+						lastIndexOfXTerm = rf.log[i].Index
+						break
+					}
+					if rf.log[i].Term < reply.XTerm {
+						break
+					}
+				}
 
-		if rf.nextIndex[server] <= startIndex {
-			rf.nextIndex[server] = startIndex + 1
+				if lastIndexOfXTerm != -1 {
+					rf.nextIndex[server] = lastIndexOfXTerm + 1
+				} else {
+					rf.nextIndex[server] = reply.XIndex
+				}
+			}
+
+			if rf.nextIndex[server] <= startIndex {
+				rf.nextIndex[server] = startIndex
+			}
+
+			rf.mu.Unlock()
+			return
 		}
 	}
 }
