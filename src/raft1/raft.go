@@ -318,7 +318,6 @@ type RequestVoteReply struct {
 	VoteGranted bool
 }
 
-// example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -464,16 +463,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.commitIndex = min(args.LeaderCommit, lastLogIndex)
 		rf.applyCommitCondVar.Broadcast()
 	}
-
-	li := 0
-	lt := 0
-
-	if rf.snapshot != nil {
-		li = rf.snapshot.LastIncludedIndex
-		lt = rf.snapshot.LastIncludedTerm
-	}
-	DPrintf("(after append entries) server %d last log entry: %v, snapshot - lastIncludedIndex: %d, lastIncludedTerm: %d\n", rf.me, rf.log[len(rf.log)-1], li, lt)
-
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
@@ -502,14 +491,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 	rf.log = append(rf.log, logEntry)
 	rf.persist()
-	li := 0
-	lt := 0
-
-	if rf.snapshot != nil {
-		li = rf.snapshot.LastIncludedIndex
-		lt = rf.snapshot.LastIncludedTerm
-	}
-	DPrintf("(after append entries) server %d last log entry: %v, snapshot - lastIncludedIndex: %d, lastIncludedTerm: %d\n", rf.me, rf.log[len(rf.log)-1], li, lt)
 
 	return index, term, isLeader
 }
