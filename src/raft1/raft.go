@@ -837,6 +837,7 @@ func (rf *Raft) applier() {
 		rf.mu.Unlock()
 		rf.applyCh <- applyMsg
 	}
+	close(rf.applyCh)
 }
 
 func Make(peers []*labrpc.ClientEnd, me int,
