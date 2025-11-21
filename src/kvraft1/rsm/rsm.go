@@ -51,7 +51,7 @@ type RSM struct {
 	applyCh            chan raftapi.ApplyMsg
 	maxraftstate       int // snapshot if log grows this big
 	sm                 StateMachine
-	waitingCommitedOps map[uint64]*CommitedOp
+	waitingCommitedOps map[uint64]chan CommitedOp
 	done               int32
 }
 
@@ -76,7 +76,7 @@ func MakeRSM(servers []*labrpc.ClientEnd, me int, persister *tester.Persister, m
 		maxraftstate:       maxraftstate,
 		applyCh:            make(chan raftapi.ApplyMsg),
 		sm:                 sm,
-		waitingCommitedOps: make(map[uint64]*CommitedOp),
+		waitingCommitedOps: make(map[uint64]chan CommitedOp),
 		done:               0,
 	}
 	if !useRaftStateMachine {
@@ -108,60 +108,77 @@ func (rsm *RSM) Submit(req any) (rpc.Err, any) {
 		Req: req,
 	}
 
+	ch := make(chan CommitedOp, 1)
+	rsm.waitingCommitedOps[op.Id] = ch
+
 	rf := rsm.Raft()
 	entryIndex, entryTerm, isLeader := rf.Start(op)
 
 	if !isLeader {
+		delete(rsm.waitingCommitedOps, op.Id)
 		rsm.mu.Unlock()
 		return rpc.ErrWrongLeader, nil
 	}
 	rsm.mu.Unlock()
 
-	for !rsm.Done() {
-		rsm.mu.Lock()
-		if rsm.waitingCommitedOps[op.Id] != nil {
-			commitedOp := rsm.waitingCommitedOps[op.Id]
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
 
-			if commitedOp.Me != op.Me && commitedOp.Index != entryIndex {
+	for !rsm.Done() {
+		select {
+		case commitedOp := <-ch:
+			rsm.mu.Lock()
+			delete(rsm.waitingCommitedOps, op.Id)
+			rsm.mu.Unlock()
+
+			if commitedOp.Index == entryIndex {
+				return rpc.OK, commitedOp.Res
+			}
+			return rpc.ErrWrongLeader, nil
+
+		case <-ticker.C:
+			currentTerm, stillLeader := rf.GetState()
+			if !stillLeader || currentTerm != entryTerm {
+				rsm.mu.Lock()
+				delete(rsm.waitingCommitedOps, op.Id)
 				rsm.mu.Unlock()
 				return rpc.ErrWrongLeader, nil
 			}
-			rsm.mu.Unlock()
-			return rpc.OK, commitedOp.Res
 		}
-
-		currentTerm, _ := rf.GetState()
-
-		if currentTerm != entryTerm {
-			rsm.mu.Unlock()
-			return rpc.ErrWrongLeader, nil
-		}
-		rsm.mu.Unlock()
-		time.Sleep(10 * time.Millisecond)
 	}
+
+	rsm.mu.Lock()
+	delete(rsm.waitingCommitedOps, op.Id)
+	rsm.mu.Unlock()
 	return rpc.ErrWrongLeader, nil
 }
 
 func (rsm *RSM) reader() {
 	for {
-		select {
-		case applyMsg, ok := <-rsm.applyCh:
-			if !ok {
-				atomic.StoreInt32(&rsm.done, 1)
-				return
-			}
-			op := applyMsg.Command.(Op)
-			res := rsm.sm.DoOp(op.Req)
+		applyMsg, ok := <-rsm.applyCh
+		if !ok {
+			atomic.StoreInt32(&rsm.done, 1)
+			return
+		}
 
-			rsm.mu.Lock()
-			rsm.waitingCommitedOps[op.Id] = &CommitedOp{
+		if !applyMsg.CommandValid {
+			continue
+		}
+
+		rsm.mu.Lock()
+		op := applyMsg.Command.(Op)
+		res := rsm.sm.DoOp(op.Req)
+
+		if ch, ok := rsm.waitingCommitedOps[op.Id]; ok {
+			select {
+			case ch <- CommitedOp{
 				Me:    op.Me,
 				Index: applyMsg.CommandIndex,
 				Res:   res,
+			}:
+			default:
 			}
-			rsm.mu.Unlock()
-		default:
-			time.Sleep(10 * time.Millisecond)
 		}
+		rsm.mu.Unlock()
 	}
 }

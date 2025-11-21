@@ -1,7 +1,6 @@
 package kvraft
 
 import (
-	"fmt"
 	"time"
 
 	"6.5840/kvsrv1/rpc"
@@ -16,7 +15,7 @@ type Clerk struct {
 }
 
 func MakeClerk(clnt *tester.Clnt, servers []string) kvtest.IKVClerk {
-	ck := &Clerk{clnt: clnt, servers: servers, leader: -1}
+	ck := &Clerk{clnt: clnt, servers: servers, leader: 0}
 	return ck
 }
 
@@ -32,24 +31,27 @@ func MakeClerk(clnt *tester.Clnt, servers []string) kvtest.IKVClerk {
 // arguments. Additionally, reply must be passed as a pointer.
 func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 	args := rpc.GetArgs{Key: key}
+	triedAllServers := false
+
 	for {
-		for i := 0; i < len(ck.servers); i++ {
-			reply := rpc.GetReply{}
-			ok := ck.clnt.Call(ck.servers[i], "KVServer.Get", &args, &reply)
-			if !ok || reply.Err == rpc.ErrWrongLeader {
-				continue
-			}
+		reply := rpc.GetReply{}
+		ok := ck.clnt.Call(ck.servers[ck.leader], "KVServer.Get", &args, &reply)
 
-			if reply.Err == rpc.ErrNoKey {
-				return "", 0, rpc.ErrNoKey
-			}
-
-			if reply.Err == rpc.OK {
-				return reply.Value, reply.Version, rpc.OK
-			}
+		if ok && reply.Err == rpc.OK {
+			return reply.Value, reply.Version, rpc.OK
 		}
-		fmt.Println("Get timeout")
-		time.Sleep(100 * time.Millisecond)
+
+		if ok && reply.Err == rpc.ErrNoKey {
+			return "", 0, rpc.ErrNoKey
+		}
+
+		oldLeader := ck.leader
+		ck.leader = (ck.leader + 1) % len(ck.servers)
+
+		if ck.leader == 0 || (triedAllServers && ck.leader <= oldLeader) {
+			triedAllServers = true
+			time.Sleep(10 * time.Millisecond)
+		}
 	}
 }
 
@@ -72,30 +74,35 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 // arguments. Additionally, reply must be passed as a pointer.
 func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
 	args := rpc.PutArgs{Key: key, Value: value, Version: version}
-	for {
-		first := true
-		for i := 0; i < len(ck.servers); i++ {
-			reply := rpc.PutReply{}
-			ok := ck.clnt.Call(ck.servers[i], "KVServer.Put", &args, &reply)
-			if !ok || reply.Err == rpc.ErrWrongLeader {
-				first = false
-				continue
-			}
+	firstAttempt := true
+	triedAllServers := false
 
+	for {
+		reply := rpc.PutReply{}
+		ok := ck.clnt.Call(ck.servers[ck.leader], "KVServer.Put", &args, &reply)
+
+		if ok {
+			if reply.Err == rpc.OK {
+				return rpc.OK
+			}
 			if reply.Err == rpc.ErrNoKey {
 				return rpc.ErrNoKey
 			}
-
-			if first && reply.Err == rpc.ErrVersion {
-				return rpc.ErrVersion
-			}
-
-			if !first && reply.Err == rpc.ErrVersion {
+			if reply.Err == rpc.ErrVersion {
+				if firstAttempt {
+					return rpc.ErrVersion
+				}
 				return rpc.ErrMaybe
 			}
-			return rpc.OK
 		}
-		fmt.Println("Put timeout")
-		time.Sleep(100 * time.Millisecond)
+
+		firstAttempt = false
+		oldLeader := ck.leader
+		ck.leader = (ck.leader + 1) % len(ck.servers)
+
+		if ck.leader == 0 || (triedAllServers && ck.leader <= oldLeader) {
+			triedAllServers = true
+			time.Sleep(10 * time.Millisecond)
+		}
 	}
 }

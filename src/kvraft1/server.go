@@ -66,9 +66,8 @@ func (kv *KVServer) DoOp(req any) any {
 			}
 		}
 		return reply
-	default:
-		return nil
 	}
+	return nil
 }
 
 func (kv *KVServer) Snapshot() []byte {
@@ -81,8 +80,7 @@ func (kv *KVServer) Restore(data []byte) {
 }
 
 func (kv *KVServer) Get(args *rpc.GetArgs, reply *rpc.GetReply) {
-	err, rep := kv.rsm.Submit(&args)
-
+	err, rep := kv.rsm.Submit(*args)
 	if err == rpc.ErrWrongLeader || rep == nil {
 		reply.Err = rpc.ErrWrongLeader
 		return
@@ -96,8 +94,14 @@ func (kv *KVServer) Get(args *rpc.GetArgs, reply *rpc.GetReply) {
 }
 
 func (kv *KVServer) Put(args *rpc.PutArgs, reply *rpc.PutReply) {
-	err, _ := kv.rsm.Submit(&args)
-	reply.Err = err
+	err, rep := kv.rsm.Submit(*args)
+
+	if err == rpc.ErrWrongLeader || rep == nil {
+		reply.Err = rpc.ErrWrongLeader
+		return
+	}
+	putReply := rep.(rpc.PutReply)
+	reply.Err = putReply.Err
 }
 
 // the tester calls Kill() when a KVServer instance won't
@@ -124,6 +128,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, gid tester.Tgid, me int, persist
 	// call labgob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
 	labgob.Register(rsm.Op{})
+	labgob.Register(rsm.CommitedOp{})
 	labgob.Register(rpc.PutArgs{})
 	labgob.Register(rpc.GetArgs{})
 	labgob.Register(rpc.PutReply{})
