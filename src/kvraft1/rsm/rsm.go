@@ -3,6 +3,7 @@ package rsm
 import (
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"6.5840/kvsrv1/rpc"
 	"6.5840/labrpc"
@@ -15,8 +16,14 @@ var useRaftStateMachine bool // to plug in another raft besided raft1
 
 type Op struct {
 	Me  int
-	Id  int
+	Id  uint64
 	Req any
+}
+
+type CommitedOp struct {
+	Me    int
+	Index int
+	Res   any
 }
 
 var idCounter uint64 = 0
@@ -38,13 +45,14 @@ type StateMachine interface {
 }
 
 type RSM struct {
-	mu           sync.Mutex
-	me           int
-	rf           raftapi.Raft
-	applyCh      chan raftapi.ApplyMsg
-	maxraftstate int // snapshot if log grows this big
-	sm           StateMachine
-	// Your definitions here.
+	mu                 sync.Mutex
+	me                 int
+	rf                 raftapi.Raft
+	applyCh            chan raftapi.ApplyMsg
+	maxraftstate       int // snapshot if log grows this big
+	sm                 StateMachine
+	waitingCommitedOps map[uint64]*CommitedOp
+	done               int32
 }
 
 // servers[] contains the ports of the set of
@@ -64,14 +72,19 @@ type RSM struct {
 // any long-running work.
 func MakeRSM(servers []*labrpc.ClientEnd, me int, persister *tester.Persister, maxraftstate int, sm StateMachine) *RSM {
 	rsm := &RSM{
-		me:           me,
-		maxraftstate: maxraftstate,
-		applyCh:      make(chan raftapi.ApplyMsg),
-		sm:           sm,
+		me:                 me,
+		maxraftstate:       maxraftstate,
+		applyCh:            make(chan raftapi.ApplyMsg),
+		sm:                 sm,
+		waitingCommitedOps: make(map[uint64]*CommitedOp),
+		done:               0,
 	}
 	if !useRaftStateMachine {
 		rsm.rf = raft.Make(servers, me, persister, rsm.applyCh)
 	}
+
+	go rsm.reader()
+
 	return rsm
 }
 
@@ -79,15 +92,76 @@ func (rsm *RSM) Raft() raftapi.Raft {
 	return rsm.rf
 }
 
+func (rsm *RSM) Done() bool {
+	z := atomic.LoadInt32(&rsm.done)
+	return z == 1
+}
+
 // Submit a command to Raft, and wait for it to be committed.  It
-// should return ErrWrongLeader if client should find new leader and
+// should return ErrWrongLeader if client should find new leader, and
 // try again.
 func (rsm *RSM) Submit(req any) (rpc.Err, any) {
+	rsm.mu.Lock()
+	op := Op{
+		Me:  rsm.me,
+		Id:  GenerateId(),
+		Req: req,
+	}
 
-	// Submit creates an Op structure to run a command through Raft;
-	// for example: op := Op{Me: rsm.me, Id: id, Req: req}, where req
-	// is the argument to Submit and id is a unique id for the op.
+	rf := rsm.Raft()
+	entryIndex, entryTerm, isLeader := rf.Start(op)
 
-	// your code here
-	return rpc.ErrWrongLeader, nil // i'm dead, try another server.
+	if !isLeader {
+		rsm.mu.Unlock()
+		return rpc.ErrWrongLeader, nil
+	}
+	rsm.mu.Unlock()
+
+	for !rsm.Done() {
+		rsm.mu.Lock()
+		if rsm.waitingCommitedOps[op.Id] != nil {
+			commitedOp := rsm.waitingCommitedOps[op.Id]
+
+			if commitedOp.Me != op.Me || commitedOp.Index != entryIndex {
+				rsm.mu.Unlock()
+				return rpc.ErrWrongLeader, nil
+			}
+			rsm.mu.Unlock()
+			return rpc.OK, commitedOp.Res
+		}
+
+		currentTerm, isLeader := rf.GetState()
+
+		if !isLeader || currentTerm != entryTerm {
+			rsm.mu.Unlock()
+			return rpc.ErrWrongLeader, nil
+		}
+		rsm.mu.Unlock()
+		time.Sleep(10 * time.Millisecond)
+	}
+	return rpc.ErrWrongLeader, nil
+}
+
+func (rsm *RSM) reader() {
+	for {
+		select {
+		case applyMsg, ok := <-rsm.applyCh:
+			if !ok {
+				atomic.StoreInt32(&rsm.done, 1)
+				return
+			}
+			op := applyMsg.Command.(Op)
+			res := rsm.sm.DoOp(op.Req)
+
+			rsm.mu.Lock()
+			rsm.waitingCommitedOps[op.Id] = &CommitedOp{
+				Me:    op.Me,
+				Index: applyMsg.CommandIndex,
+				Res:   res,
+			}
+			rsm.mu.Unlock()
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
 }

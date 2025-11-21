@@ -499,6 +499,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
+	close(rf.applyCh)
 }
 
 func (rf *Raft) killed() bool {
@@ -837,7 +838,6 @@ func (rf *Raft) applier() {
 		rf.mu.Unlock()
 		rf.applyCh <- applyMsg
 	}
-	close(rf.applyCh)
 }
 
 func Make(peers []*labrpc.ClientEnd, me int,
