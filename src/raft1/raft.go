@@ -71,6 +71,7 @@ type Raft struct {
 
 	applyCh            chan raftapi.ApplyMsg
 	applyCommitCondVar *sync.Cond
+	wg                 sync.WaitGroup
 }
 
 func (rf *Raft) GetLastLogEntry() LogEntry {
@@ -503,6 +504,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	rf.applyCommitCondVar.Broadcast()
+
+	rf.wg.Wait()
+	close(rf.applyCh)
 }
 
 func (rf *Raft) killed() bool {
@@ -800,6 +804,8 @@ func (rf *Raft) updateCommitIndex() {
 }
 
 func (rf *Raft) ticker() {
+	rf.wg.Add(1)
+	defer rf.wg.Done()
 	for !rf.killed() {
 		rf.mu.Lock()
 		if time.Since(rf.lastPing) > rf.electionTimeout && rf.state != Leader {
@@ -816,17 +822,23 @@ func (rf *Raft) ticker() {
 }
 
 func (rf *Raft) applier() {
+	rf.wg.Add(1)
+	defer rf.wg.Done()
 	for !rf.killed() {
 		rf.mu.Lock()
-		for rf.commitIndex <= rf.lastApplied {
+		for rf.commitIndex <= rf.lastApplied && !rf.killed() {
 			rf.applyCommitCondVar.Wait()
+		}
+
+		if rf.killed() {
+			rf.mu.Unlock()
+			return
 		}
 
 		logIndex := rf.logIndex(rf.lastApplied + 1)
 
 		if logIndex < 0 || logIndex >= len(rf.log) {
 			rf.mu.Unlock()
-			time.Sleep(10 * time.Millisecond)
 			continue
 		}
 
