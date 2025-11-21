@@ -498,13 +498,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.log = append(rf.log, logEntry)
 	rf.persist()
 
-	for server := range rf.peers {
-		if server == rf.me {
-			continue
-		}
-		go rf.sendAppendEntriesToFollower(server)
-	}
-
 	return index, term, isLeader
 }
 
