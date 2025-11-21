@@ -270,7 +270,10 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		Snapshot:      args.Data,
 	}
 	rf.mu.Unlock()
-	rf.applyCh <- applyMsg
+
+	if !rf.killed() {
+		rf.applyCh <- applyMsg
+	}
 }
 
 func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
@@ -499,7 +502,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
-	close(rf.applyCh)
+	rf.applyCommitCondVar.Broadcast()
 }
 
 func (rf *Raft) killed() bool {
@@ -836,7 +839,10 @@ func (rf *Raft) applier() {
 			CommandIndex: entry.Index,
 		}
 		rf.mu.Unlock()
-		rf.applyCh <- applyMsg
+
+		if !rf.killed() {
+			rf.applyCh <- applyMsg
+		}
 	}
 }
 
