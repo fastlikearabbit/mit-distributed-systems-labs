@@ -122,7 +122,7 @@ func (rsm *RSM) Submit(req any) (rpc.Err, any) {
 		if rsm.waitingCommitedOps[op.Id] != nil {
 			commitedOp := rsm.waitingCommitedOps[op.Id]
 
-			if commitedOp.Me != op.Me || commitedOp.Index != entryIndex {
+			if commitedOp.Me != op.Me && commitedOp.Index != entryIndex {
 				rsm.mu.Unlock()
 				return rpc.ErrWrongLeader, nil
 			}
@@ -130,9 +130,9 @@ func (rsm *RSM) Submit(req any) (rpc.Err, any) {
 			return rpc.OK, commitedOp.Res
 		}
 
-		currentTerm, isLeader := rf.GetState()
+		currentTerm, _ := rf.GetState()
 
-		if !isLeader || currentTerm != entryTerm {
+		if currentTerm != entryTerm {
 			rsm.mu.Unlock()
 			return rpc.ErrWrongLeader, nil
 		}

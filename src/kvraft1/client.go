@@ -1,21 +1,22 @@
 package kvraft
 
 import (
+	"fmt"
+	"time"
+
 	"6.5840/kvsrv1/rpc"
 	"6.5840/kvtest1"
 	"6.5840/tester1"
 )
 
-
 type Clerk struct {
 	clnt    *tester.Clnt
 	servers []string
-	// You will have to modify this struct.
+	leader  int
 }
 
 func MakeClerk(clnt *tester.Clnt, servers []string) kvtest.IKVClerk {
-	ck := &Clerk{clnt: clnt, servers: servers}
-	// You'll have to add code here.
+	ck := &Clerk{clnt: clnt, servers: servers, leader: -1}
 	return ck
 }
 
@@ -30,9 +31,26 @@ func MakeClerk(clnt *tester.Clnt, servers []string) kvtest.IKVClerk {
 // must match the declared types of the RPC handler function's
 // arguments. Additionally, reply must be passed as a pointer.
 func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
+	args := rpc.GetArgs{Key: key}
+	for {
+		for i := 0; i < len(ck.servers); i++ {
+			reply := rpc.GetReply{}
+			ok := ck.clnt.Call(ck.servers[i], "KVServer.Get", &args, &reply)
+			if !ok || reply.Err == rpc.ErrWrongLeader {
+				continue
+			}
 
-	// You will have to modify this function.
-	return "", 0, ""
+			if reply.Err == rpc.ErrNoKey {
+				return "", 0, rpc.ErrNoKey
+			}
+
+			if reply.Err == rpc.OK {
+				return reply.Value, reply.Version, rpc.OK
+			}
+		}
+		fmt.Println("Get timeout")
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 // Put updates key with value only if the version in the
@@ -53,6 +71,31 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 // must match the declared types of the RPC handler function's
 // arguments. Additionally, reply must be passed as a pointer.
 func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
-	// You will have to modify this function.
-	return ""
+	args := rpc.PutArgs{Key: key, Value: value, Version: version}
+	for {
+		first := true
+		for i := 0; i < len(ck.servers); i++ {
+			reply := rpc.PutReply{}
+			ok := ck.clnt.Call(ck.servers[i], "KVServer.Put", &args, &reply)
+			if !ok || reply.Err == rpc.ErrWrongLeader {
+				first = false
+				continue
+			}
+
+			if reply.Err == rpc.ErrNoKey {
+				return rpc.ErrNoKey
+			}
+
+			if first && reply.Err == rpc.ErrVersion {
+				return rpc.ErrVersion
+			}
+
+			if !first && reply.Err == rpc.ErrVersion {
+				return rpc.ErrMaybe
+			}
+			return rpc.OK
+		}
+		fmt.Println("Put timeout")
+		time.Sleep(100 * time.Millisecond)
+	}
 }
