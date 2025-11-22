@@ -72,6 +72,8 @@ type Raft struct {
 	applyCh            chan raftapi.ApplyMsg
 	applyCommitCondVar *sync.Cond
 	wg                 sync.WaitGroup
+
+	replicateNow chan struct{}
 }
 
 func (rf *Raft) GetLastLogEntry() LogEntry {
@@ -122,7 +124,7 @@ func (rf *Raft) ConvertToLeader() {
 // ---------------------------------------------------------------
 
 func GetRandElectionTimeout() time.Duration {
-	ms := 300 + rand.Int63()%300
+	ms := 200 + rand.Int63()%200
 	return time.Duration(ms) * time.Millisecond
 }
 
@@ -232,6 +234,11 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		return
 	}
 
+	if args.LastIncludedIndex <= rf.lastApplied {
+		rf.mu.Unlock()
+		return
+	}
+
 	logIndex := rf.logIndex(args.LastIncludedIndex)
 
 	if logIndex >= 0 && logIndex < len(rf.log) && rf.log[logIndex].Term == args.LastIncludedTerm {
@@ -270,6 +277,9 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		SnapshotTerm:  args.LastIncludedTerm,
 		Snapshot:      args.Data,
 	}
+
+	rf.applyCommitCondVar.Broadcast()
+
 	rf.mu.Unlock()
 
 	if !rf.killed() {
@@ -498,11 +508,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.log = append(rf.log, logEntry)
 	rf.persist()
 
-	for server := range rf.peers {
-		if server == rf.me {
-			continue
-		}
-		go rf.sendAppendEntriesToFollower(server)
+	select {
+	case rf.replicateNow <- struct{}{}:
+	default:
 	}
 
 	return index, term, isLeader
@@ -599,6 +607,9 @@ func (rf *Raft) sendHeartBeats() {
 	currentTerm := rf.currentTerm
 	rf.mu.Unlock()
 
+	ticker := time.NewTicker(HeartbeatInterval)
+	defer ticker.Stop()
+
 	for !rf.killed() {
 		rf.mu.Lock()
 		if rf.state != Leader || rf.currentTerm != currentTerm {
@@ -614,7 +625,14 @@ func (rf *Raft) sendHeartBeats() {
 		}
 		rf.mu.Unlock()
 
-		time.Sleep(HeartbeatInterval)
+		select {
+		case <-ticker.C:
+			// Regular heartbeat interval elapsed
+		case <-rf.replicateNow:
+			// Immediate replication triggered
+		case <-time.After(HeartbeatInterval):
+			// Fallback timer
+		}
 	}
 }
 
@@ -842,6 +860,11 @@ func (rf *Raft) applier() {
 			return
 		}
 
+		if rf.commitIndex <= rf.lastApplied {
+			rf.mu.Unlock()
+			continue
+		}
+
 		logIndex := rf.logIndex(rf.lastApplied + 1)
 
 		if logIndex < 0 || logIndex >= len(rf.log) {
@@ -849,8 +872,16 @@ func (rf *Raft) applier() {
 			continue
 		}
 
-		rf.lastApplied += 1
 		entry := rf.log[logIndex]
+
+		// protect against dummy
+		if entry.Command == nil {
+			rf.lastApplied += 1
+			rf.mu.Unlock()
+			continue
+		}
+
+		rf.lastApplied += 1
 
 		applyMsg := raftapi.ApplyMsg{
 			CommandValid: true,
@@ -891,6 +922,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	rf.applyCh = applyCh
 	rf.applyCommitCondVar = sync.NewCond(&rf.mu)
+	rf.replicateNow = make(chan struct{}, 1)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
