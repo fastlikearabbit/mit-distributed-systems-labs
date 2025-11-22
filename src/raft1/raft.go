@@ -927,19 +927,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
-	if rf.snapshot != nil {
-		applyMsg := raftapi.ApplyMsg{
-			CommandValid:  false,
-			SnapshotValid: true,
-			SnapshotIndex: rf.snapshot.LastIncludedIndex,
-			SnapshotTerm:  rf.snapshot.LastIncludedTerm,
-			Snapshot:      rf.snapshot.Snapshot,
-		}
-		go func() {
-			applyCh <- applyMsg
-		}()
-	}
-
 	// start ticker goroutine to start elections
 	go rf.ticker()
 

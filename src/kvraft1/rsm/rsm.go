@@ -53,23 +53,10 @@ type RSM struct {
 	sm                 StateMachine
 	waitingCommitedOps map[uint64]chan CommitedOp
 	done               int32
+	persister          *tester.Persister
+	lastApplied        int // track last applied index for snapshotting
 }
 
-// servers[] contains the ports of the set of
-// servers that will cooperate via Raft to
-// form the fault-tolerant key/value service.
-//
-// me is the index of the current server in servers[].
-//
-// the k/v server should store snapshots through the underlying Raft
-// implementation, which should call persister.SaveStateAndSnapshot() to
-// atomically save the Raft state along with the snapshot.
-// The RSM should snapshot when Raft's saved state exceeds maxraftstate bytes,
-// in order to allow Raft to garbage-collect its log. if maxraftstate is -1,
-// you don't need to snapshot.
-//
-// MakeRSM() must return quickly, so it should start goroutines for
-// any long-running work.
 func MakeRSM(servers []*labrpc.ClientEnd, me int, persister *tester.Persister, maxraftstate int, sm StateMachine) *RSM {
 	rsm := &RSM{
 		me:                 me,
@@ -78,9 +65,16 @@ func MakeRSM(servers []*labrpc.ClientEnd, me int, persister *tester.Persister, m
 		sm:                 sm,
 		waitingCommitedOps: make(map[uint64]chan CommitedOp),
 		done:               0,
+		persister:          persister,
+		lastApplied:        0,
 	}
 	if !useRaftStateMachine {
 		rsm.rf = raft.Make(servers, me, persister, rsm.applyCh)
+	}
+
+	snap := persister.ReadSnapshot()
+	if len(snap) > 0 {
+		sm.Restore(snap)
 	}
 
 	go rsm.reader()
@@ -161,13 +155,32 @@ func (rsm *RSM) reader() {
 			return
 		}
 
-		if !applyMsg.CommandValid {
+		rsm.mu.Lock()
+
+		if applyMsg.SnapshotValid {
+			if applyMsg.SnapshotIndex > rsm.lastApplied {
+				rsm.sm.Restore(applyMsg.Snapshot)
+				rsm.lastApplied = applyMsg.SnapshotIndex
+			}
+			rsm.mu.Unlock()
 			continue
 		}
 
-		rsm.mu.Lock()
+		if !applyMsg.CommandValid {
+			rsm.mu.Unlock()
+			continue
+		}
+
+		if applyMsg.CommandIndex <= rsm.lastApplied {
+			rsm.mu.Unlock()
+			continue
+		}
+
 		op := applyMsg.Command.(Op)
+
 		res := rsm.sm.DoOp(op.Req)
+
+		rsm.lastApplied = applyMsg.CommandIndex
 
 		if ch, ok := rsm.waitingCommitedOps[op.Id]; ok {
 			select {
@@ -179,6 +192,16 @@ func (rsm *RSM) reader() {
 			default:
 			}
 		}
+
+		if rsm.maxraftstate > 0 && rsm.Raft().PersistBytes() > rsm.maxraftstate {
+			rsm.takeSnapshot(applyMsg.CommandIndex)
+		}
+
 		rsm.mu.Unlock()
 	}
+}
+
+func (rsm *RSM) takeSnapshot(index int) {
+	snapshot := rsm.sm.Snapshot()
+	rsm.Raft().Snapshot(index, snapshot)
 }
