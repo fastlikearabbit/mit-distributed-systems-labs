@@ -1,65 +1,326 @@
 package shardgrp
 
 import (
+	"bytes"
+	"log"
+	"sync"
 	"sync/atomic"
-
 
 	"6.5840/kvraft1/rsm"
 	"6.5840/kvsrv1/rpc"
 	"6.5840/labgob"
 	"6.5840/labrpc"
+	"6.5840/shardkv1/shardcfg"
 	"6.5840/shardkv1/shardgrp/shardrpc"
 	"6.5840/tester1"
 )
 
-
+type VersionedValue struct {
+	Value   string
+	Version rpc.Tversion
+}
 type KVServer struct {
 	me   int
 	dead int32 // set by Kill()
 	rsm  *rsm.RSM
 	gid  tester.Tgid
 
-	// Your code here
-}
+	mu           sync.Mutex
+	versionedMap map[string]VersionedValue
 
+	latestNum map[shardcfg.Tshid]shardcfg.Tnum
+	frozen    map[shardcfg.Tshid]bool
+}
 
 func (kv *KVServer) DoOp(req any) any {
-	// Your code here
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	switch req.(type) {
+	case rpc.GetArgs:
+		args := req.(rpc.GetArgs)
+		reply := rpc.GetReply{}
+
+		sh := shardcfg.Key2Shard(args.Key)
+
+		if _, known := kv.latestNum[sh]; !known {
+			reply.Err = rpc.ErrWrongGroup
+			return reply
+		}
+
+		versionedValue, ok := kv.versionedMap[args.Key]
+		if ok {
+			reply.Err = rpc.OK
+			reply.Value = versionedValue.Value
+			reply.Version = versionedValue.Version
+		} else {
+			reply.Err = rpc.ErrNoKey
+		}
+		return reply
+
+	case rpc.PutArgs:
+		args := req.(rpc.PutArgs)
+		reply := rpc.PutReply{}
+
+		sh := shardcfg.Key2Shard(args.Key)
+
+		if kv.frozen[sh] {
+			reply.Err = rpc.ErrWrongGroup
+			return reply
+		}
+
+		if _, known := kv.latestNum[sh]; !known {
+			reply.Err = rpc.ErrWrongGroup
+			return reply
+		}
+
+		versionedValue, ok := kv.versionedMap[args.Key]
+		if ok {
+			if args.Version != versionedValue.Version {
+				reply.Err = rpc.ErrVersion
+			} else {
+				reply.Err = rpc.OK
+				kv.versionedMap[args.Key] = VersionedValue{Value: args.Value, Version: args.Version + 1}
+			}
+		} else {
+			if args.Version == 0 {
+				reply.Err = rpc.OK
+				kv.versionedMap[args.Key] = VersionedValue{args.Value, 1}
+			} else {
+				reply.Err = rpc.ErrNoKey
+			}
+		}
+		return reply
+
+	case shardrpc.FreezeShardArgs:
+		args := req.(shardrpc.FreezeShardArgs)
+		reply := shardrpc.FreezeShardReply{}
+
+		if args.Num <= kv.latestNum[args.Shard] {
+			reply.Err = rpc.OK
+			reply.Num = kv.latestNum[args.Shard]
+
+			if kv.frozen[args.Shard] || args.Num == kv.latestNum[args.Shard] {
+				state := make(map[string]VersionedValue)
+				for k, v := range kv.versionedMap {
+					sh := shardcfg.Key2Shard(k)
+					if sh == args.Shard {
+						state[k] = v
+					}
+				}
+				w := new(bytes.Buffer)
+				e := labgob.NewEncoder(w)
+				if e.Encode(state) == nil {
+					reply.State = w.Bytes()
+				}
+			}
+			return reply
+		}
+
+		if _, known := kv.latestNum[args.Shard]; !known {
+			reply.Err = rpc.ErrWrongGroup
+			return reply
+		}
+
+		kv.frozen[args.Shard] = true
+		kv.latestNum[args.Shard] = args.Num
+
+		reply.Err = rpc.OK
+		reply.Num = args.Num
+
+		state := make(map[string]VersionedValue)
+		for k, v := range kv.versionedMap {
+			sh := shardcfg.Key2Shard(k)
+			if sh == args.Shard {
+				state[k] = v
+			}
+		}
+		w := new(bytes.Buffer)
+		e := labgob.NewEncoder(w)
+		if e.Encode(state) != nil {
+			reply.Err = rpc.ErrWrongGroup
+			return reply
+		}
+		reply.State = w.Bytes()
+
+		return reply
+
+	case shardrpc.InstallShardArgs:
+		args := req.(shardrpc.InstallShardArgs)
+		reply := shardrpc.InstallShardReply{}
+
+		if args.Num <= kv.latestNum[args.Shard] {
+			reply.Err = rpc.OK
+			return reply
+		}
+
+		if len(args.State) > 0 {
+			stateMap := make(map[string]VersionedValue)
+			r := bytes.NewBuffer(args.State)
+			d := labgob.NewDecoder(r)
+			if d.Decode(&stateMap) != nil {
+				reply.Err = rpc.ErrWrongGroup
+				return reply
+			}
+
+			for k, v := range stateMap {
+				kv.versionedMap[k] = v
+			}
+		}
+
+		kv.latestNum[args.Shard] = args.Num
+		delete(kv.frozen, args.Shard)
+
+		reply.Err = rpc.OK
+		return reply
+
+	case shardrpc.DeleteShardArgs:
+		args := req.(shardrpc.DeleteShardArgs)
+		reply := shardrpc.DeleteShardReply{}
+
+		if _, known := kv.latestNum[args.Shard]; !known {
+			reply.Err = rpc.OK
+			return reply
+		}
+
+		if args.Num < kv.latestNum[args.Shard] {
+			reply.Err = rpc.OK
+			return reply
+		}
+
+		for k := range kv.versionedMap {
+			sh := shardcfg.Key2Shard(k)
+			if sh == args.Shard {
+				delete(kv.versionedMap, k)
+			}
+		}
+
+		delete(kv.latestNum, args.Shard)
+		delete(kv.frozen, args.Shard)
+
+		reply.Err = rpc.OK
+		return reply
+	}
 	return nil
 }
 
-
 func (kv *KVServer) Snapshot() []byte {
-	// Your code here
-	return nil
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	if e.Encode(kv.versionedMap) != nil {
+		log.Fatalf("%v couldn't encode versionedMap", kv.me)
+	}
+	if e.Encode(kv.latestNum) != nil {
+		log.Fatalf("%v couldn't encode latestNum", kv.me)
+	}
+
+	if e.Encode(kv.frozen) != nil {
+		log.Fatalf("%v couldn't encode frozen", kv.me)
+	}
+	return w.Bytes()
 }
 
 func (kv *KVServer) Restore(data []byte) {
-	// Your code here
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	if d.Decode(&kv.versionedMap) != nil {
+		log.Fatalf("%v couldn't decode versionedMap", kv.me)
+	}
+	if d.Decode(&kv.latestNum) != nil {
+		log.Fatalf("%v couldn't decode latestNum", kv.me)
+	}
+	if d.Decode(&kv.frozen) != nil {
+		log.Fatalf("%v couldn't decode frozen", kv.me)
+	}
 }
 
 func (kv *KVServer) Get(args *rpc.GetArgs, reply *rpc.GetReply) {
-	// Your code here
+	err, rep := kv.rsm.Submit(*args)
+	if err == rpc.ErrWrongLeader || err == rpc.ErrWrongGroup {
+		reply.Err = err
+		return
+	}
+
+	getReply := rep.(rpc.GetReply)
+
+	reply.Err = getReply.Err
+	reply.Value = getReply.Value
+	reply.Version = getReply.Version
 }
 
 func (kv *KVServer) Put(args *rpc.PutArgs, reply *rpc.PutReply) {
-	// Your code here
+	err, rep := kv.rsm.Submit(*args)
+
+	if err == rpc.ErrWrongLeader || err == rpc.ErrWrongGroup {
+		reply.Err = err
+		return
+	}
+	putReply := rep.(rpc.PutReply)
+	reply.Err = putReply.Err
 }
 
 // Freeze the specified shard (i.e., reject future Get/Puts for this
 // shard) and return the key/values stored in that shard.
 func (kv *KVServer) FreezeShard(args *shardrpc.FreezeShardArgs, reply *shardrpc.FreezeShardReply) {
-	// Your code here
+	kv.mu.Lock()
+	reply.Num = kv.latestNum[args.Shard]
+
+	if args.Num < kv.latestNum[args.Shard] {
+		kv.mu.Unlock()
+		reply.Err = rpc.OK
+		return
+	}
+	kv.mu.Unlock()
+
+	err, rep := kv.rsm.Submit(*args)
+
+	if err == rpc.ErrWrongLeader || rep == nil {
+		reply.Err = err
+		return
+	}
+	freezeReply := rep.(shardrpc.FreezeShardReply)
+	reply.Err = freezeReply.Err
+
+	reply.State = freezeReply.State
+	reply.Num = freezeReply.Num
 }
 
 // Install the supplied state for the specified shard.
 func (kv *KVServer) InstallShard(args *shardrpc.InstallShardArgs, reply *shardrpc.InstallShardReply) {
-	// Your code here
+	kv.mu.Lock()
+	if args.Num < kv.latestNum[args.Shard] {
+		kv.mu.Unlock()
+		reply.Err = rpc.OK
+		return
+	}
+	kv.mu.Unlock()
+
+	err, rep := kv.rsm.Submit(*args)
+	if err == rpc.ErrWrongLeader || rep == nil {
+		reply.Err = err
+		return
+	}
+	installReply := rep.(shardrpc.InstallShardReply)
+	reply.Err = installReply.Err
 }
 
 // Delete the specified shard.
 func (kv *KVServer) DeleteShard(args *shardrpc.DeleteShardArgs, reply *shardrpc.DeleteShardReply) {
-	// Your code here
+	kv.mu.Lock()
+	if args.Num < kv.latestNum[args.Shard] {
+		kv.mu.Unlock()
+		reply.Err = rpc.OK
+		return
+	}
+	kv.mu.Unlock()
+
+	err, rep := kv.rsm.Submit(*args)
+	if err == rpc.ErrWrongLeader || rep == nil {
+		reply.Err = err
+		return
+	}
+	deleteReply := rep.(shardrpc.DeleteShardReply)
+	reply.Err = deleteReply.Err
 }
 
 // the tester calls Kill() when a KVServer instance won't
@@ -93,11 +354,25 @@ func StartServerShardGrp(servers []*labrpc.ClientEnd, gid tester.Tgid, me int, p
 	labgob.Register(shardrpc.InstallShardArgs{})
 	labgob.Register(shardrpc.DeleteShardArgs{})
 	labgob.Register(rsm.Op{})
+	labgob.Register(rsm.CommitedOp{})
+	labgob.Register(VersionedValue{})
+	labgob.Register(map[string]VersionedValue{})
 
-	kv := &KVServer{gid: gid, me: me}
+	kv := &KVServer{
+		gid:          gid,
+		me:           me,
+		versionedMap: make(map[string]VersionedValue),
+		latestNum:    make(map[shardcfg.Tshid]shardcfg.Tnum),
+		frozen:       make(map[shardcfg.Tshid]bool),
+	}
+
+	if gid == shardcfg.Gid1 {
+		for i := 0; i < shardcfg.NShards; i++ {
+			kv.latestNum[shardcfg.Tshid(i)] = 0
+		}
+	}
+
 	kv.rsm = rsm.MakeRSM(servers, me, persister, maxraftstate, kv)
-
-	// Your code here
 
 	return []tester.IService{kv, kv.rsm.Raft()}
 }

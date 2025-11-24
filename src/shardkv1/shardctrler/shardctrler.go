@@ -5,13 +5,15 @@ package shardctrler
 //
 
 import (
+	"sync"
 
 	"6.5840/kvsrv1"
+	"6.5840/kvsrv1/rpc"
 	"6.5840/kvtest1"
 	"6.5840/shardkv1/shardcfg"
+	"6.5840/shardkv1/shardgrp"
 	"6.5840/tester1"
 )
-
 
 // ShardCtrler for the controller and kv clerk.
 type ShardCtrler struct {
@@ -20,7 +22,13 @@ type ShardCtrler struct {
 
 	killed int32 // set by Kill()
 
-	// Your data here.
+	cfgId string
+	mu    sync.Mutex
+}
+
+type shardMove struct {
+	fromGid tester.Tgid
+	toGid   tester.Tgid
 }
 
 // Make a ShardCltler, which stores its state in a kvsrv.
@@ -28,7 +36,7 @@ func MakeShardCtrler(clnt *tester.Clnt) *ShardCtrler {
 	sck := &ShardCtrler{clnt: clnt}
 	srv := tester.ServerName(tester.GRP0, 0)
 	sck.IKVClerk = kvsrv.MakeClerk(clnt, srv)
-	// Your code here.
+	sck.cfgId = "cfgId"
 	return sck
 }
 
@@ -44,7 +52,7 @@ func (sck *ShardCtrler) InitController() {
 // pick the key to name the configuration.  The initial configuration
 // lists shardgrp shardcfg.Gid1 for all shards.
 func (sck *ShardCtrler) InitConfig(cfg *shardcfg.ShardConfig) {
-	// Your code here
+	sck.IKVClerk.Put(sck.cfgId, cfg.String(), 0)
 }
 
 // Called by the tester to ask the controller to change the
@@ -52,13 +60,74 @@ func (sck *ShardCtrler) InitConfig(cfg *shardcfg.ShardConfig) {
 // changes the configuration it may be superseded by another
 // controller.
 func (sck *ShardCtrler) ChangeConfigTo(new *shardcfg.ShardConfig) {
-	// Your code here.
-}
+	for {
+		cfgString, ver, err := sck.IKVClerk.Get(sck.cfgId)
+		if err != rpc.OK {
+			continue
+		}
 
+		cur := shardcfg.FromString(cfgString)
+		if cur.Num >= new.Num {
+			return
+		}
+
+		shardsToMove := make(map[int]shardMove)
+		for shardNum := 0; shardNum < shardcfg.NShards; shardNum++ {
+			oldGid := cur.Shards[shardNum]
+			newGid := new.Shards[shardNum]
+			if oldGid != newGid {
+				shardsToMove[shardNum] = shardMove{
+					fromGid: oldGid,
+					toGid:   newGid,
+				}
+			}
+		}
+
+		frozenShards := make(map[int][]byte)
+		allFrozen := true
+		for shardNum, move := range shardsToMove {
+			ck := shardgrp.MakeClerk(sck.clnt, cur.Groups[move.fromGid])
+			data, err := ck.FreezeShard(shardcfg.Tshid(shardNum), new.Num)
+			if err == rpc.OK {
+				frozenShards[shardNum] = data
+			} else {
+				allFrozen = false
+				break
+			}
+		}
+		if !allFrozen {
+			continue
+		}
+
+		allInstalled := true
+		for shardNum, move := range shardsToMove {
+			ck := shardgrp.MakeClerk(sck.clnt, new.Groups[move.toGid])
+			err := ck.InstallShard(shardcfg.Tshid(shardNum), frozenShards[shardNum], new.Num)
+			if err != rpc.OK {
+				allInstalled = false
+				break
+			}
+		}
+		if !allInstalled {
+			continue
+		}
+
+		putErr := sck.IKVClerk.Put(sck.cfgId, new.String(), ver)
+		if putErr == rpc.OK {
+			for shardNum, move := range shardsToMove {
+				ck := shardgrp.MakeClerk(sck.clnt, cur.Groups[move.fromGid])
+				ck.DeleteShard(shardcfg.Tshid(shardNum), new.Num)
+			}
+			return
+		}
+	}
+}
 
 // Return the current configuration
 func (sck *ShardCtrler) Query() *shardcfg.ShardConfig {
-	// Your code here.
-	return nil
+	cfg, _, err := sck.IKVClerk.Get(sck.cfgId)
+	if err != rpc.OK {
+		return nil
+	}
+	return shardcfg.FromString(cfg)
 }
-
