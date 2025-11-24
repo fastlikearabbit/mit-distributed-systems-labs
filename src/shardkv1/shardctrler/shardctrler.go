@@ -111,11 +111,6 @@ func (sck *ShardCtrler) ChangeConfigTo(new *shardcfg.ShardConfig) {
 			}
 		}
 
-		putErr := sck.IKVClerk.Put(sck.cfgId, new.String(), ver)
-		if putErr != rpc.OK {
-			continue
-		}
-
 		deletedShards := make(map[int]bool)
 		for len(deletedShards) < len(shardsToMove) {
 			for shardNum, move := range shardsToMove {
@@ -128,6 +123,10 @@ func (sck *ShardCtrler) ChangeConfigTo(new *shardcfg.ShardConfig) {
 					deletedShards[shardNum] = true
 				}
 			}
+		}
+		putErr := sck.IKVClerk.Put(sck.cfgId, new.String(), ver)
+		if putErr != rpc.OK {
+			continue
 		}
 	}
 }
