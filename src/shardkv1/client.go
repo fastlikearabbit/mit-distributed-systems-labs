@@ -41,7 +41,9 @@ func MakeClerk(clnt *tester.Clnt, sck *shardctrler.ShardCtrler) kvtest.IKVClerk 
 // responsible for key.  You can make a clerk for that group by
 // calling shardgrp.MakeClerk(ck.clnt, servers).
 func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
+	cnt := 0
 	for {
+		cnt++
 		sh := shardcfg.Key2Shard(key)
 		cfg := ck.sck.Query()
 		_, servers, ok := cfg.GidServers(sh)

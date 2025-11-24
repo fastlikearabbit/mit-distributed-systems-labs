@@ -96,11 +96,25 @@ func (kv *KVServer) DoOp(req any) any {
 		args := req.(shardrpc.FreezeShardArgs)
 		reply := shardrpc.FreezeShardReply{}
 
-		if args.Num <= kv.latestNum[args.Shard] {
-			reply.Err = rpc.OK
-			reply.Num = kv.latestNum[args.Shard]
+		currentNum, known := kv.latestNum[args.Shard]
 
-			if kv.frozen[args.Shard] || args.Num == kv.latestNum[args.Shard] {
+		if !known {
+			reply.Err = rpc.OK
+			reply.Num = args.Num
+			state := make(map[string]VersionedValue)
+			w := new(bytes.Buffer)
+			e := labgob.NewEncoder(w)
+			if e.Encode(state) == nil {
+				reply.State = w.Bytes()
+			}
+			return reply
+		}
+
+		if args.Num <= currentNum {
+			reply.Err = rpc.OK
+			reply.Num = currentNum
+
+			if kv.frozen[args.Shard] || args.Num == currentNum {
 				state := make(map[string]VersionedValue)
 				for k, v := range kv.versionedMap {
 					sh := shardcfg.Key2Shard(k)
@@ -114,11 +128,6 @@ func (kv *KVServer) DoOp(req any) any {
 					reply.State = w.Bytes()
 				}
 			}
-			return reply
-		}
-
-		if _, known := kv.latestNum[args.Shard]; !known {
-			reply.Err = rpc.ErrWrongGroup
 			return reply
 		}
 
@@ -154,6 +163,12 @@ func (kv *KVServer) DoOp(req any) any {
 			return reply
 		}
 
+		for k := range kv.versionedMap {
+			if shardcfg.Key2Shard(k) == args.Shard {
+				delete(kv.versionedMap, k)
+			}
+		}
+
 		if len(args.State) > 0 {
 			stateMap := make(map[string]VersionedValue)
 			r := bytes.NewBuffer(args.State)
@@ -176,12 +191,14 @@ func (kv *KVServer) DoOp(req any) any {
 		args := req.(shardrpc.DeleteShardArgs)
 		reply := shardrpc.DeleteShardReply{}
 
-		if _, known := kv.latestNum[args.Shard]; !known {
+		currentNum, known := kv.latestNum[args.Shard]
+
+		if !known {
 			reply.Err = rpc.OK
 			return reply
 		}
 
-		if args.Num < kv.latestNum[args.Shard] {
+		if args.Num < currentNum {
 			reply.Err = rpc.OK
 			return reply
 		}

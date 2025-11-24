@@ -21,9 +21,13 @@ func MakeClerk(clnt *tester.Clnt, servers []string) *Clerk {
 	return ck
 }
 
+// In shardgrp/clerk.go
+
 func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 	args := rpc.GetArgs{Key: key}
 	triedAllServers := false
+	retryCount := 0
+	maxRetries := 10
 
 	for {
 		reply := rpc.GetReply{}
@@ -46,6 +50,12 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 
 		if ck.leader == 0 || (triedAllServers && ck.leader <= oldLeader) {
 			triedAllServers = true
+			retryCount++
+
+			if retryCount >= maxRetries {
+				return "", 0, rpc.ErrWrongGroup
+			}
+
 			time.Sleep(10 * time.Millisecond)
 		}
 	}
@@ -55,6 +65,8 @@ func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
 	args := rpc.PutArgs{Key: key, Value: value, Version: version}
 	firstAttempt := true
 	triedAllServers := false
+	retryCount := 0
+	maxRetries := 10
 
 	for {
 		reply := rpc.PutReply{}
@@ -84,6 +96,12 @@ func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
 
 		if ck.leader == 0 || (triedAllServers && ck.leader <= oldLeader) {
 			triedAllServers = true
+			retryCount++
+
+			if retryCount >= maxRetries {
+				return rpc.ErrWrongGroup
+			}
+
 			time.Sleep(10 * time.Millisecond)
 		}
 	}
@@ -95,6 +113,8 @@ func (ck *Clerk) FreezeShard(s shardcfg.Tshid, num shardcfg.Tnum) ([]byte, rpc.E
 		Shard: s,
 	}
 	triedAllServers := false
+	retryCount := 0
+	maxRetries := 10
 
 	for {
 		reply := shardrpc.FreezeShardReply{}
@@ -113,6 +133,12 @@ func (ck *Clerk) FreezeShard(s shardcfg.Tshid, num shardcfg.Tnum) ([]byte, rpc.E
 
 		if ck.leader == 0 || (triedAllServers && ck.leader <= oldLeader) {
 			triedAllServers = true
+			retryCount++
+
+			if retryCount >= maxRetries {
+				return nil, rpc.ErrWrongGroup
+			}
+
 			time.Sleep(10 * time.Millisecond)
 		}
 	}
@@ -125,6 +151,8 @@ func (ck *Clerk) InstallShard(s shardcfg.Tshid, state []byte, num shardcfg.Tnum)
 		State: state,
 	}
 	triedAllServers := false
+	retryCount := 0
+	maxRetries := 10
 
 	for {
 		reply := shardrpc.InstallShardReply{}
@@ -143,6 +171,11 @@ func (ck *Clerk) InstallShard(s shardcfg.Tshid, state []byte, num shardcfg.Tnum)
 
 		if ck.leader == 0 || (triedAllServers && ck.leader <= oldLeader) {
 			triedAllServers = true
+			retryCount++
+
+			if retryCount >= maxRetries {
+				return rpc.ErrWrongGroup
+			}
 			time.Sleep(10 * time.Millisecond)
 		}
 	}
@@ -154,6 +187,8 @@ func (ck *Clerk) DeleteShard(s shardcfg.Tshid, num shardcfg.Tnum) rpc.Err {
 		Shard: s,
 	}
 	triedAllServers := false
+	retryCount := 0
+	maxRetries := 10
 
 	for {
 		reply := shardrpc.DeleteShardReply{}
@@ -172,6 +207,13 @@ func (ck *Clerk) DeleteShard(s shardcfg.Tshid, num shardcfg.Tnum) rpc.Err {
 
 		if ck.leader == 0 || (triedAllServers && ck.leader <= oldLeader) {
 			triedAllServers = true
+
+			retryCount++
+
+			if retryCount >= maxRetries {
+				return rpc.ErrWrongGroup
+			}
+
 			time.Sleep(10 * time.Millisecond)
 		}
 	}

@@ -128,6 +128,7 @@ func (sck *ShardCtrler) ChangeConfigTo(new *shardcfg.ShardConfig) {
 		if putErr != rpc.OK {
 			continue
 		}
+		return
 	}
 }
 
