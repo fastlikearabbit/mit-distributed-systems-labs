@@ -112,12 +112,22 @@ func (sck *ShardCtrler) ChangeConfigTo(new *shardcfg.ShardConfig) {
 		}
 
 		putErr := sck.IKVClerk.Put(sck.cfgId, new.String(), ver)
-		if putErr == rpc.OK {
+		if putErr != rpc.OK {
+			continue
+		}
+
+		deletedShards := make(map[int]bool)
+		for len(deletedShards) < len(shardsToMove) {
 			for shardNum, move := range shardsToMove {
+				if deletedShards[shardNum] {
+					continue
+				}
 				ck := shardgrp.MakeClerk(sck.clnt, cur.Groups[move.fromGid])
-				ck.DeleteShard(shardcfg.Tshid(shardNum), new.Num)
+				err := ck.DeleteShard(shardcfg.Tshid(shardNum), new.Num)
+				if err == rpc.OK {
+					deletedShards[shardNum] = true
+				}
 			}
-			return
 		}
 	}
 }

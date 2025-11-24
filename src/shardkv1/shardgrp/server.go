@@ -169,8 +169,6 @@ func (kv *KVServer) DoOp(req any) any {
 		}
 
 		kv.latestNum[args.Shard] = args.Num
-		delete(kv.frozen, args.Shard)
-
 		reply.Err = rpc.OK
 		return reply
 
