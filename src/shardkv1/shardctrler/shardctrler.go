@@ -84,32 +84,31 @@ func (sck *ShardCtrler) ChangeConfigTo(new *shardcfg.ShardConfig) {
 		}
 
 		frozenShards := make(map[int][]byte)
-		allFrozen := true
-		for shardNum, move := range shardsToMove {
-			ck := shardgrp.MakeClerk(sck.clnt, cur.Groups[move.fromGid])
-			data, err := ck.FreezeShard(shardcfg.Tshid(shardNum), new.Num)
-			if err == rpc.OK {
-				frozenShards[shardNum] = data
-			} else {
-				allFrozen = false
-				break
+		for len(frozenShards) < len(shardsToMove) {
+			for shardNum, move := range shardsToMove {
+				if _, alreadyFrozen := frozenShards[shardNum]; alreadyFrozen {
+					continue
+				}
+				ck := shardgrp.MakeClerk(sck.clnt, cur.Groups[move.fromGid])
+				data, err := ck.FreezeShard(shardcfg.Tshid(shardNum), new.Num)
+				if err == rpc.OK {
+					frozenShards[shardNum] = data
+				}
 			}
-		}
-		if !allFrozen {
-			continue
 		}
 
-		allInstalled := true
-		for shardNum, move := range shardsToMove {
-			ck := shardgrp.MakeClerk(sck.clnt, new.Groups[move.toGid])
-			err := ck.InstallShard(shardcfg.Tshid(shardNum), frozenShards[shardNum], new.Num)
-			if err != rpc.OK {
-				allInstalled = false
-				break
+		installedShards := make(map[int]bool)
+		for len(installedShards) < len(shardsToMove) {
+			for shardNum, move := range shardsToMove {
+				if installedShards[shardNum] {
+					continue
+				}
+				ck := shardgrp.MakeClerk(sck.clnt, new.Groups[move.toGid])
+				err := ck.InstallShard(shardcfg.Tshid(shardNum), frozenShards[shardNum], new.Num)
+				if err == rpc.OK {
+					installedShards[shardNum] = true
+				}
 			}
-		}
-		if !allInstalled {
-			continue
 		}
 
 		putErr := sck.IKVClerk.Put(sck.cfgId, new.String(), ver)

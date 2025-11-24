@@ -262,16 +262,6 @@ func (kv *KVServer) Put(args *rpc.PutArgs, reply *rpc.PutReply) {
 // Freeze the specified shard (i.e., reject future Get/Puts for this
 // shard) and return the key/values stored in that shard.
 func (kv *KVServer) FreezeShard(args *shardrpc.FreezeShardArgs, reply *shardrpc.FreezeShardReply) {
-	kv.mu.Lock()
-	reply.Num = kv.latestNum[args.Shard]
-
-	if args.Num < kv.latestNum[args.Shard] {
-		kv.mu.Unlock()
-		reply.Err = rpc.OK
-		return
-	}
-	kv.mu.Unlock()
-
 	err, rep := kv.rsm.Submit(*args)
 
 	if err == rpc.ErrWrongLeader || rep == nil {
@@ -287,14 +277,6 @@ func (kv *KVServer) FreezeShard(args *shardrpc.FreezeShardArgs, reply *shardrpc.
 
 // Install the supplied state for the specified shard.
 func (kv *KVServer) InstallShard(args *shardrpc.InstallShardArgs, reply *shardrpc.InstallShardReply) {
-	kv.mu.Lock()
-	if args.Num < kv.latestNum[args.Shard] {
-		kv.mu.Unlock()
-		reply.Err = rpc.OK
-		return
-	}
-	kv.mu.Unlock()
-
 	err, rep := kv.rsm.Submit(*args)
 	if err == rpc.ErrWrongLeader || rep == nil {
 		reply.Err = err
@@ -306,14 +288,6 @@ func (kv *KVServer) InstallShard(args *shardrpc.InstallShardArgs, reply *shardrp
 
 // Delete the specified shard.
 func (kv *KVServer) DeleteShard(args *shardrpc.DeleteShardArgs, reply *shardrpc.DeleteShardReply) {
-	kv.mu.Lock()
-	if args.Num < kv.latestNum[args.Shard] {
-		kv.mu.Unlock()
-		reply.Err = rpc.OK
-		return
-	}
-	kv.mu.Unlock()
-
 	err, rep := kv.rsm.Submit(*args)
 	if err == rpc.ErrWrongLeader || rep == nil {
 		reply.Err = err
