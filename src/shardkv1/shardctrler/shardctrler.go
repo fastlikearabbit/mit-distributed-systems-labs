@@ -22,8 +22,9 @@ type ShardCtrler struct {
 
 	killed int32 // set by Kill()
 
-	cfgId string
-	mu    sync.Mutex
+	cfgId     string
+	nextCfgId string
+	mu        sync.Mutex
 }
 
 type shardMove struct {
@@ -37,6 +38,7 @@ func MakeShardCtrler(clnt *tester.Clnt) *ShardCtrler {
 	srv := tester.ServerName(tester.GRP0, 0)
 	sck.IKVClerk = kvsrv.MakeClerk(clnt, srv)
 	sck.cfgId = "cfgId"
+	sck.nextCfgId = "nextCfgId"
 	return sck
 }
 
@@ -44,6 +46,22 @@ func MakeShardCtrler(clnt *tester.Clnt) *ShardCtrler {
 // controller. In part A, this method doesn't need to do anything. In
 // B and C, this method implements recovery.
 func (sck *ShardCtrler) InitController() {
+	curString, _, err := sck.IKVClerk.Get(sck.cfgId)
+	if err != rpc.OK {
+		return
+	}
+
+	nextString, _, err := sck.IKVClerk.Get(sck.nextCfgId)
+	if err != rpc.OK {
+		return
+	}
+
+	cur := shardcfg.FromString(curString)
+	next := shardcfg.FromString(nextString)
+
+	if next.Num > cur.Num {
+		sck.ChangeConfigTo(next)
+	}
 }
 
 // Called once by the tester to supply the first configuration.  You
@@ -69,6 +87,30 @@ func (sck *ShardCtrler) ChangeConfigTo(new *shardcfg.ShardConfig) {
 		cur := shardcfg.FromString(cfgString)
 		if cur.Num >= new.Num {
 			return
+		}
+
+		nextString, nextVer, err := sck.IKVClerk.Get(sck.nextCfgId)
+
+		if err == rpc.OK {
+			next := shardcfg.FromString(nextString)
+
+			if next.Num == new.Num {
+				if next.String() != new.String() {
+					return
+				}
+			} else if next.Num > new.Num {
+				return
+			} else {
+				putErr := sck.IKVClerk.Put(sck.nextCfgId, new.String(), nextVer)
+				if putErr != rpc.OK {
+					continue
+				}
+			}
+		} else {
+			putErr := sck.IKVClerk.Put(sck.nextCfgId, new.String(), 0)
+			if putErr != rpc.OK {
+				continue
+			}
 		}
 
 		shardsToMove := make(map[int]shardMove)
@@ -127,6 +169,10 @@ func (sck *ShardCtrler) ChangeConfigTo(new *shardcfg.ShardConfig) {
 		putErr := sck.IKVClerk.Put(sck.cfgId, new.String(), ver)
 		if putErr != rpc.OK {
 			continue
+		}
+		_, nextVer2, err := sck.IKVClerk.Get(sck.nextCfgId)
+		if err == rpc.OK {
+			sck.IKVClerk.Put(sck.nextCfgId, new.String(), nextVer2)
 		}
 		return
 	}
