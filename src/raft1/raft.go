@@ -72,8 +72,6 @@ type Raft struct {
 	applyCh            chan raftapi.ApplyMsg
 	applyCommitCondVar *sync.Cond
 	wg                 sync.WaitGroup
-
-	replicateNow chan struct{}
 }
 
 func (rf *Raft) GetLastLogEntry() LogEntry {
@@ -508,9 +506,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.log = append(rf.log, logEntry)
 	rf.persist()
 
-	select {
-	case rf.replicateNow <- struct{}{}:
-	default:
+	for server := range rf.peers {
+		if server == rf.me {
+			continue
+		}
+		go rf.sendAppendEntriesToFollower(server)
 	}
 
 	return index, term, isLeader
@@ -607,9 +607,6 @@ func (rf *Raft) sendHeartBeats() {
 	currentTerm := rf.currentTerm
 	rf.mu.Unlock()
 
-	ticker := time.NewTicker(HeartbeatInterval)
-	defer ticker.Stop()
-
 	for !rf.killed() {
 		rf.mu.Lock()
 		if rf.state != Leader || rf.currentTerm != currentTerm {
@@ -625,14 +622,7 @@ func (rf *Raft) sendHeartBeats() {
 		}
 		rf.mu.Unlock()
 
-		select {
-		case <-ticker.C:
-			// Regular heartbeat interval elapsed
-		case <-rf.replicateNow:
-			// Immediate replication triggered
-		case <-time.After(HeartbeatInterval):
-			// Fallback timer
-		}
+		time.Sleep(HeartbeatInterval)
 	}
 }
 
@@ -922,7 +912,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	rf.applyCh = applyCh
 	rf.applyCommitCondVar = sync.NewCond(&rf.mu)
-	rf.replicateNow = make(chan struct{}, 1)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
