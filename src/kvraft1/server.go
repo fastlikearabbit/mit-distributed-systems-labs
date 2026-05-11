@@ -26,6 +26,151 @@ type KVServer struct {
 	versionedMap map[string]VersionedValue
 }
 
+func (kv *KVServer) getOp(key string) rpc.TxnOpResponse {
+	versionedValue, ok := kv.versionedMap[key]
+	if !ok {
+		return rpc.TxnOpResponse{Kind: rpc.TxnOpGet, Err: rpc.ErrNoKey}
+	}
+	return rpc.TxnOpResponse{
+		Kind:    rpc.TxnOpGet,
+		Value:   versionedValue.Value,
+		Version: versionedValue.Version,
+		Err:     rpc.OK,
+	}
+}
+
+func (kv *KVServer) putOp(key, value string) rpc.TxnOpResponse {
+	versionedValue, ok := kv.versionedMap[key]
+	version := rpc.Tversion(1)
+	if ok {
+		version = versionedValue.Version + 1
+	}
+	kv.versionedMap[key] = VersionedValue{Value: value, Version: version}
+	return rpc.TxnOpResponse{
+		Kind:    rpc.TxnOpPut,
+		Value:   value,
+		Version: version,
+		Err:     rpc.OK,
+	}
+}
+
+func compareVersion(actual, expected rpc.Tversion, result rpc.TxnCompareResult) (bool, bool) {
+	switch result {
+	case rpc.TxnCompareEqual:
+		return actual == expected, true
+	case rpc.TxnCompareNotEqual:
+		return actual != expected, true
+	case rpc.TxnCompareGreater:
+		return actual > expected, true
+	case rpc.TxnCompareLess:
+		return actual < expected, true
+	default:
+		return false, false
+	}
+}
+
+func compareValue(actual, expected string, result rpc.TxnCompareResult) (bool, bool) {
+	switch result {
+	case rpc.TxnCompareEqual:
+		return actual == expected, true
+	case rpc.TxnCompareNotEqual:
+		return actual != expected, true
+	case rpc.TxnCompareGreater:
+		return actual > expected, true
+	case rpc.TxnCompareLess:
+		return actual < expected, true
+	default:
+		return false, false
+	}
+}
+
+func (kv *KVServer) evaluateCompare(cmp rpc.TxnCompare) (bool, bool) {
+	versionedValue, ok := kv.versionedMap[cmp.Key]
+	switch cmp.Target {
+	case rpc.TxnCompareVersion:
+		actual := rpc.Tversion(0)
+		if ok {
+			actual = versionedValue.Version
+		}
+		return compareVersion(actual, cmp.Version, cmp.Result)
+	case rpc.TxnCompareValue:
+		actual := ""
+		if ok {
+			actual = versionedValue.Value
+		}
+		return compareValue(actual, cmp.Value, cmp.Result)
+	default:
+		return false, false
+	}
+}
+
+func validTxnOps(ops []rpc.TxnOp) bool {
+	for _, op := range ops {
+		if op.Kind != rpc.TxnOpGet && op.Kind != rpc.TxnOpPut {
+			return false
+		}
+	}
+	return true
+}
+
+func (kv *KVServer) applyTxn(args rpc.TxnArgs) rpc.TxnReply {
+	reply := rpc.TxnReply{Err: rpc.OK}
+
+	if !validTxnOps(args.Then) || !validTxnOps(args.Else) {
+		reply.Err = rpc.ErrTxn
+		return reply
+	}
+
+	succeeded := true
+	for _, cmp := range args.Compare {
+		matched, valid := kv.evaluateCompare(cmp)
+		if !valid {
+			reply.Err = rpc.ErrTxn
+			return reply
+		}
+		if !matched {
+			succeeded = false
+			break
+		}
+	}
+
+	reply.Succeeded = succeeded
+	ops := args.Then
+	if !succeeded {
+		ops = args.Else
+	}
+
+	for _, op := range ops {
+		switch op.Kind {
+		case rpc.TxnOpGet:
+			reply.Responses = append(reply.Responses, kv.getOp(op.Key))
+		case rpc.TxnOpPut:
+			reply.Responses = append(reply.Responses, kv.putOp(op.Key, op.Value))
+		}
+	}
+
+	return reply
+}
+
+func (kv *KVServer) applyVersionedPut(args rpc.PutArgs) rpc.PutReply {
+	txnReply := kv.applyTxn(rpc.TxnArgs{
+		Compare: []rpc.TxnCompare{rpc.CmpVersion(args.Key, rpc.TxnCompareEqual, args.Version)},
+		Then:    []rpc.TxnOp{rpc.OpPut(args.Key, args.Value)},
+		Else:    []rpc.TxnOp{rpc.OpGet(args.Key)},
+	})
+
+	if txnReply.Err != rpc.OK {
+		return rpc.PutReply{Err: txnReply.Err}
+	}
+	if txnReply.Succeeded {
+		return rpc.PutReply{Err: rpc.OK}
+	}
+	if len(txnReply.Responses) > 0 && txnReply.Responses[0].Err == rpc.ErrNoKey {
+		return rpc.PutReply{Err: rpc.ErrNoKey}
+	}
+	return rpc.PutReply{Err: rpc.ErrVersion}
+}
+
 // To type-cast req to the right type, take a look at Go's type switches or type
 // assertions below:
 //
@@ -39,35 +184,21 @@ func (kv *KVServer) DoOp(req any) any {
 	case rpc.GetArgs:
 		args := req.(rpc.GetArgs)
 		reply := rpc.GetReply{}
-		versionedValue, ok := kv.versionedMap[args.Key]
-		if ok {
+		res := kv.getOp(args.Key)
+		if res.Err == rpc.OK {
 			reply.Err = rpc.OK
-			reply.Value = versionedValue.Value
-			reply.Version = versionedValue.Version
+			reply.Value = res.Value
+			reply.Version = res.Version
 		} else {
 			reply.Err = rpc.ErrNoKey
 		}
 		return reply
 	case rpc.PutArgs:
 		args := req.(rpc.PutArgs)
-		reply := rpc.PutReply{}
-		versionedValue, ok := kv.versionedMap[args.Key]
-		if ok {
-			if args.Version != versionedValue.Version {
-				reply.Err = rpc.ErrVersion
-			} else {
-				reply.Err = rpc.OK
-				kv.versionedMap[args.Key] = VersionedValue{Value: args.Value, Version: args.Version + 1}
-			}
-		} else {
-			if args.Version == 0 {
-				reply.Err = rpc.OK
-				kv.versionedMap[args.Key] = VersionedValue{args.Value, 1}
-			} else {
-				reply.Err = rpc.ErrNoKey
-			}
-		}
-		return reply
+		return kv.applyVersionedPut(args)
+	case rpc.TxnArgs:
+		args := req.(rpc.TxnArgs)
+		return kv.applyTxn(args)
 	}
 	return nil
 }
@@ -114,6 +245,19 @@ func (kv *KVServer) Put(args *rpc.PutArgs, reply *rpc.PutReply) {
 	reply.Err = putReply.Err
 }
 
+func (kv *KVServer) Txn(args *rpc.TxnArgs, reply *rpc.TxnReply) {
+	err, rep := kv.rsm.Submit(*args)
+
+	if err == rpc.ErrWrongLeader || rep == nil {
+		reply.Err = rpc.ErrWrongLeader
+		return
+	}
+	txnReply := rep.(rpc.TxnReply)
+	reply.Err = txnReply.Err
+	reply.Succeeded = txnReply.Succeeded
+	reply.Responses = txnReply.Responses
+}
+
 // the tester calls Kill() when a KVServer instance won't
 // be needed again. for your convenience, we supply
 // code to set rf.dead (without needing a lock),
@@ -141,8 +285,13 @@ func StartKVServer(servers []*labrpc.ClientEnd, gid tester.Tgid, me int, persist
 	labgob.Register(rsm.CommitedOp{})
 	labgob.Register(rpc.PutArgs{})
 	labgob.Register(rpc.GetArgs{})
+	labgob.Register(rpc.TxnArgs{})
+	labgob.Register(rpc.TxnCompare{})
+	labgob.Register(rpc.TxnOp{})
 	labgob.Register(rpc.PutReply{})
 	labgob.Register(rpc.GetReply{})
+	labgob.Register(rpc.TxnReply{})
+	labgob.Register(rpc.TxnOpResponse{})
 
 	kv := &KVServer{
 		me:           me,
