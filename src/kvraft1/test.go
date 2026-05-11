@@ -50,6 +50,15 @@ func (ts *Test) MakeClerk() kvtest.IKVClerk {
 	return &kvtest.TestClerk{ck, clnt}
 }
 
+func (ts *Test) MakeRawClerk() *Clerk {
+	clnt := ts.Config.MakeClient()
+	return MakeClerk(clnt, ts.Group(Gid).SrvNames()).(*Clerk)
+}
+
+func (ts *Test) DeleteRawClerk(ck *Clerk) {
+	ts.DeleteClient(ck.clnt)
+}
+
 func (ts *Test) DeleteClerk(ck kvtest.IKVClerk) {
 	tck := ck.(*kvtest.TestClerk)
 	ts.DeleteClient(tck.Clnt)
