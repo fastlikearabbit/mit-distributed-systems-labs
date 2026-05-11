@@ -14,9 +14,58 @@ type Clerk struct {
 	leader  int
 }
 
+type Txn struct {
+	ck   *Clerk
+	args rpc.TxnArgs
+}
+
 func MakeClerk(clnt *tester.Clnt, servers []string) kvtest.IKVClerk {
 	ck := &Clerk{clnt: clnt, servers: servers, leader: 0}
 	return ck
+}
+
+func (ck *Clerk) Txn() *Txn {
+	return &Txn{ck: ck}
+}
+
+func (txn *Txn) If(cmps ...rpc.TxnCompare) *Txn {
+	txn.args.Compare = append(txn.args.Compare, cmps...)
+	return txn
+}
+
+func (txn *Txn) Then(ops ...rpc.TxnOp) *Txn {
+	txn.args.Then = append(txn.args.Then, ops...)
+	return txn
+}
+
+func (txn *Txn) Else(ops ...rpc.TxnOp) *Txn {
+	txn.args.Else = append(txn.args.Else, ops...)
+	return txn
+}
+
+func (txn *Txn) Commit() (rpc.TxnReply, rpc.Err) {
+	return txn.ck.CommitTxn(txn.args)
+}
+
+func (ck *Clerk) CommitTxn(args rpc.TxnArgs) (rpc.TxnReply, rpc.Err) {
+	triedAllServers := false
+
+	for {
+		reply := rpc.TxnReply{}
+		ok := ck.clnt.Call(ck.servers[ck.leader], "KVServer.Txn", &args, &reply)
+
+		if ok && reply.Err != rpc.ErrWrongLeader {
+			return reply, reply.Err
+		}
+
+		oldLeader := ck.leader
+		ck.leader = (ck.leader + 1) % len(ck.servers)
+
+		if ck.leader == 0 || (triedAllServers && ck.leader <= oldLeader) {
+			triedAllServers = true
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
 }
 
 // Get fetches the current value and version for a key.  It returns
@@ -73,26 +122,33 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 // must match the declared types of the RPC handler function's
 // arguments. Additionally, reply must be passed as a pointer.
 func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
-	args := rpc.PutArgs{Key: key, Value: value, Version: version}
+	args := rpc.TxnArgs{
+		Compare: []rpc.TxnCompare{rpc.CmpVersion(key, rpc.TxnCompareEqual, version)},
+		Then:    []rpc.TxnOp{rpc.OpPut(key, value)},
+		Else:    []rpc.TxnOp{rpc.OpGet(key)},
+	}
 	firstAttempt := true
 	triedAllServers := false
 
 	for {
-		reply := rpc.PutReply{}
-		ok := ck.clnt.Call(ck.servers[ck.leader], "KVServer.Put", &args, &reply)
+		reply := rpc.TxnReply{}
+		ok := ck.clnt.Call(ck.servers[ck.leader], "KVServer.Txn", &args, &reply)
 
 		if ok {
-			if reply.Err == rpc.OK {
+			if reply.Err == rpc.OK && reply.Succeeded {
 				return rpc.OK
 			}
-			if reply.Err == rpc.ErrNoKey {
-				return rpc.ErrNoKey
-			}
-			if reply.Err == rpc.ErrVersion {
+			if reply.Err == rpc.OK && !reply.Succeeded {
+				if len(reply.Responses) > 0 && reply.Responses[0].Err == rpc.ErrNoKey {
+					return rpc.ErrNoKey
+				}
 				if firstAttempt {
 					return rpc.ErrVersion
 				}
 				return rpc.ErrMaybe
+			}
+			if reply.Err == rpc.ErrTxn {
+				return rpc.ErrTxn
 			}
 		}
 
