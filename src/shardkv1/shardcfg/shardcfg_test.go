@@ -60,3 +60,48 @@ func TestBasic(t *testing.T) {
 	cfg.LeaveBalance([]tester.Tgid{Gid2})
 	cfg.CheckConfig(t, []tester.Tgid{})
 }
+
+func TestConsistentHashRebalance(t *testing.T) {
+	const (
+		Gid1 = 1
+		Gid2 = 2
+		Gid3 = 3
+	)
+
+	cfg := MakeShardConfig()
+	cfg.JoinBalance(map[tester.Tgid][]string{Gid1: []string{"a"}})
+	oneGroup := cfg.Copy()
+
+	cfg.JoinBalance(map[tester.Tgid][]string{Gid2: []string{"b"}})
+	cfg.CheckConfig(t, []tester.Tgid{Gid1, Gid2})
+
+	moved := 0
+	for shard, oldGid := range oneGroup.Shards {
+		if cfg.Shards[shard] != oldGid {
+			moved++
+			if cfg.Shards[shard] != Gid2 {
+				t.Fatalf("shard %d moved from %d to %d, not to the joining group", shard, oldGid, cfg.Shards[shard])
+			}
+		}
+	}
+	if moved == 0 || moved == NShards {
+		t.Fatalf("join moved %d shards out of %d; expected a non-trivial subset", moved, NShards)
+	}
+
+	twoGroups := cfg.Copy()
+	cfg.JoinBalance(map[tester.Tgid][]string{Gid3: []string{"c"}})
+	cfg.CheckConfig(t, []tester.Tgid{Gid1, Gid2, Gid3})
+	for shard, oldGid := range twoGroups.Shards {
+		if cfg.Shards[shard] != oldGid && cfg.Shards[shard] != Gid3 {
+			t.Fatalf("shard %d moved from existing group %d to existing group %d on join", shard, oldGid, cfg.Shards[shard])
+		}
+	}
+
+	cfg.LeaveBalance([]tester.Tgid{Gid2})
+	cfg.CheckConfig(t, []tester.Tgid{Gid1, Gid3})
+	for shard, gid := range cfg.Shards {
+		if gid == Gid2 {
+			t.Fatalf("shard %d still assigned to departed group %d", shard, gid)
+		}
+	}
+}
